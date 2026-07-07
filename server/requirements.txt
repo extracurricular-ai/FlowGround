@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+loopgraph
+pytest
+pytest-asyncio
+httpx

@@ -1,0 +1,6 @@
+body{margin:0;background:#F6EFE3;font-family:'Nunito',system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
+@keyframes flowdash{to{stroke-dashoffset:-24}}
+@keyframes toastin{from{opacity:0;transform:translate(-50%,14px)}to{opacity:1;transform:translate(-50%,0)}}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+input:focus,select:focus{outline:2px solid rgba(232,104,74,.35);outline-offset:0}
+.pal-item:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(90,60,30,.12);border-color:#E2CFB2!important}
