@@ -1,8 +1,11 @@
 """flowground.v1 fixtures used across the test files."""
 
+import json
+
 KIND_OF = {
     "start": "TASK", "ask": "TASK", "say": "TASK", "set": "TASK",
     "iff": "SWITCH", "loop": "SWITCH", "fn": "TASK", "end": "TERMINAL",
+    "split": "TASK", "merge": "AGGREGATE", "subgraph": "SUBGRAPH",
 }
 
 
@@ -204,6 +207,106 @@ def shared_loops_flow():
         edge("e3", "n2", "false", "n4"),
         edge("e4", "n3", "out", "n2"),
         edge("e5", "n4", "out", "n2"),
+    ])
+
+
+def split_merge_flow():
+    """start -> split into two branches -> merge -> end."""
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "set", {"name": "num", "expr": "4"}),
+        node("n3", "split"),
+        node("n4", "say", {"text": "branch a"}),
+        node("n5", "fn", {"fn": "square", "arg": "num", "result": "squared"}),
+        node("n6", "merge"),
+        node("n7", "say", {"text": "merged, squared={squared}"}),
+        node("n8", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "out", "n3"),
+        edge("e3", "n3", "a", "n4"),
+        edge("e4", "n3", "b", "n5"),
+        edge("e5", "n4", "out", "n6"),
+        edge("e6", "n5", "out", "n6"),
+        edge("e7", "n6", "out", "n7"),
+        edge("e8", "n7", "out", "n8"),
+    ])
+
+
+def inner_loop_subflow(prefix="sg"):
+    """A tiny 2-round count-loop, in nested flowground.v1 shape — the body
+    of a "subgraph" block's config["graph"] (JSON-encoded)."""
+    return flow(f"{prefix}_start", [
+        node(f"{prefix}_start", "start"),
+        node(f"{prefix}_loop", "loop", {"mode": "count", "times": "2"}),
+        node(f"{prefix}_say", "say", {"text": "inner round"}),
+        node(f"{prefix}_end", "end"),
+    ], [
+        edge(f"{prefix}_e1", f"{prefix}_start", "out", f"{prefix}_loop"),
+        edge(f"{prefix}_e2", f"{prefix}_loop", "repeat", f"{prefix}_say"),
+        edge(f"{prefix}_e3", f"{prefix}_say", "out", f"{prefix}_loop"),
+        edge(f"{prefix}_e4", f"{prefix}_loop", "done", f"{prefix}_end"),
+    ])
+
+
+def subgraph_flow():
+    """start -> loop(2x) whose body is a subgraph node (itself a 2x loop)
+    -> end. Mirrors the frontend's example demo's outer-loop/subgraph shape."""
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "loop", {"mode": "count", "times": "2"}),
+        node("n3", "subgraph", {"graph": json.dumps(inner_loop_subflow())}),
+        node("n4", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "repeat", "n3"),
+        edge("e3", "n3", "out", "n2"),
+        edge("e4", "n2", "done", "n4"),
+    ])
+
+
+def split_merge_loop_subgraph_flow():
+    """The full example-demo shape: parallel run -> merge -> loop whose body
+    is a subgraph node that is itself a loop."""
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "set", {"name": "num", "expr": "4"}),
+        node("n3", "split"),
+        node("n4", "say", {"text": "branch a"}),
+        node("n5", "fn", {"fn": "square", "arg": "num", "result": "squared"}),
+        node("n6", "merge"),
+        node("n7", "loop", {"mode": "count", "times": "2"}),
+        node("n8", "subgraph", {"graph": json.dumps(inner_loop_subflow())}),
+        node("n9", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "out", "n3"),
+        edge("e3", "n3", "a", "n4"),
+        edge("e4", "n3", "b", "n5"),
+        edge("e5", "n4", "out", "n6"),
+        edge("e6", "n5", "out", "n6"),
+        edge("e7", "n6", "out", "n7"),
+        edge("e8", "n7", "repeat", "n8"),
+        edge("e9", "n8", "out", "n7"),
+        edge("e10", "n7", "done", "n9"),
+    ])
+
+
+def duplicate_id_subgraph_flow():
+    """A subgraph block reuses a top-level node id — must be rejected."""
+    inner = flow("n2", [
+        node("n2", "start"),
+        node("t", "end"),
+    ], [
+        edge("ie1", "n2", "out", "t"),
+    ])
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "subgraph", {"graph": json.dumps(inner)}),
+        node("n3", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "out", "n3"),
     ])
 
 

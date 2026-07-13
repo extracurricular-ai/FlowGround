@@ -14,10 +14,11 @@ SWITCH handlers return the chosen port to LoopGraph (the edges carry matching
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loopgraph.core.graph import Edge as LGEdge
 from loopgraph.core.graph import Graph as LGGraph
@@ -27,7 +28,8 @@ from loopgraph.registry.function_registry import FunctionRegistry
 
 from .safe_eval import (EmptyExprError, ExprError, coerce, eval_expr, fmt,
                         interp, js_number, js_truthy)
-from .schema import BLOCKS, Flow, FlowNode, FlowValidationError
+from .schema import (BLOCKS, NESTED_GRAPH_BLOCKS, Flow, FlowEdge, FlowNode,
+                     FlowValidationError, parse_flow)
 
 #: cap on executed nodes per run (PROTOCOL.md: after 150 executed nodes,
 #: emit the warn line + ``finished(step_limit)``).
@@ -37,6 +39,8 @@ _KIND_MAP = {
     "TASK": NodeKind.TASK,
     "SWITCH": NodeKind.SWITCH,
     "TERMINAL": NodeKind.TERMINAL,
+    "AGGREGATE": NodeKind.AGGREGATE,
+    "SUBGRAPH": NodeKind.SUBGRAPH,
 }
 
 
@@ -50,15 +54,30 @@ class Report:
     vars: Dict[str, Any]
     step: int
     halt: Optional[str] = None  # None | "end" | "error" | "step_limit"
+    #: True for a block whose completion activates ALL of its out-edges at
+    #: once (currently only "split") — the run context then expects one
+    #: NODE_SCHEDULED per activated edge instead of exactly one.
+    fan_out: bool = False
 
 
 @dataclass
 class CompiledFlow:
     flow: Flow
     graph: LGGraph
-    #: (node id, port) → (edge id, target node id) — the static edge map.
+    #: (node id, port) → (edge id, target node id) — the static edge map,
+    #: merged across the top-level flow AND every nested subgraph body (all
+    #: node/edge ids are globally unique, so one flat map covers all scopes).
     edge_map: Dict[Tuple[str, str], Tuple[str, str]] = field(default_factory=dict)
+    #: every compiled FlowNode, top-level and nested, keyed by id.
     nodes: Dict[str, FlowNode] = field(default_factory=dict)
+    #: node ids that belong to the outermost flow — only their "end" block
+    #: halts the whole run. A nested subgraph's "end" block just ends that
+    #: child graph; LoopGraph does that automatically when its TERMINAL runs.
+    top_level_ids: Set[str] = field(default_factory=set)
+    #: node id → nearest enclosing top-level SUBGRAPH node id (identity for
+    #: top-level ids themselves). Lets the WS session keep a subgraph block
+    #: highlighted on canvas for the duration of its child graph's run.
+    node_scope: Dict[str, str] = field(default_factory=dict)
 
 
 class BlockError(Exception):
@@ -82,35 +101,106 @@ def _friendly_engine_error(message: str) -> str:
     return f"The LoopGraph engine rejected this flow: {message}"
 
 
+def _compile_subgraph_body(n: FlowNode, enclosing: Optional[str], *,
+                           all_flow_nodes: Dict[str, FlowNode],
+                           edge_map: Dict[Tuple[str, str], Tuple[str, str]],
+                           top_level_ids: Set[str],
+                           node_scope: Dict[str, str]) -> LGGraph:
+    """Parse+compile a "subgraph" block's nested ``flowground.v1`` body."""
+    label = BLOCKS[n.block].label
+    raw = n.config.get("graph", "")
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise FlowValidationError(
+            [f'The "{label}" block ({n.id}) has an invalid nested flow: '
+             f'its "graph" setting isn’t valid JSON ({exc}).']) from exc
+    try:
+        child_flow = parse_flow(data)
+    except FlowValidationError as exc:
+        raise FlowValidationError(
+            [f'The "{label}" block ({n.id}) has an invalid nested flow: ' + m
+             for m in exc.errors]) from exc
+    outer_scope = n.id if enclosing is None else enclosing
+    return _compile_scope(child_flow.nodes, child_flow.edges, enclosing=outer_scope,
+                          all_flow_nodes=all_flow_nodes, edge_map=edge_map,
+                          top_level_ids=top_level_ids, node_scope=node_scope)
+
+
+def _compile_scope(flow_nodes: List[FlowNode], flow_edges: List[FlowEdge], *,
+                   enclosing: Optional[str],
+                   all_flow_nodes: Dict[str, FlowNode],
+                   edge_map: Dict[Tuple[str, str], Tuple[str, str]],
+                   top_level_ids: Set[str],
+                   node_scope: Dict[str, str]) -> LGGraph:
+    """Compile one flow's worth of nodes/edges into an ``LGGraph``, recursing
+    into any "subgraph" blocks. All node/edge ids across every scope share
+    one flat ``all_flow_nodes``/``edge_map`` (ids must be globally unique)."""
+    nodes: Dict[str, LGNode] = {}
+    local_nodes: Dict[str, FlowNode] = {}
+    for n in flow_nodes:
+        if n.id in all_flow_nodes:
+            raise FlowValidationError(
+                [f'Two blocks share the id "{n.id}" (including inside a '
+                 "subgraph) — every block needs a unique id, even nested ones."])
+        # Register this node BEFORE recursing into any nested subgraph body,
+        # so a child that reuses an id already in scope — including this
+        # very subgraph node's own id — is caught, regardless of nesting order.
+        local_nodes[n.id] = n
+        all_flow_nodes[n.id] = n
+        if enclosing is None:
+            top_level_ids.add(n.id)
+            node_scope[n.id] = n.id
+        else:
+            node_scope[n.id] = enclosing
+
+        spec = BLOCKS[n.block]
+        if n.block in NESTED_GRAPH_BLOCKS:
+            child_graph = _compile_subgraph_body(
+                n, enclosing, all_flow_nodes=all_flow_nodes, edge_map=edge_map,
+                top_level_ids=top_level_ids, node_scope=node_scope)
+            lg_config: Dict[str, object] = {"graph": child_graph.to_dict()}
+            handler = ""
+        else:
+            lg_config = {}
+            handler = n.id
+        # allow_partial_upstream: loop headers have >1 upstream edge and the
+        # engine would otherwise wait for ALL of them (deadlock on cycles).
+        # AGGREGATE-kind nodes ignore this flag and always join properly.
+        nodes[n.id] = LGNode(
+            id=n.id,
+            kind=_KIND_MAP[spec.kind],
+            handler=handler,
+            config=lg_config,
+            allow_partial_upstream=True,
+        )
+
+    lg_edges: Dict[str, LGEdge] = {}
+    for e in flow_edges:
+        metadata: Dict[str, object] = {"port": e.port}
+        if BLOCKS[local_nodes[e.source].block].kind == "SWITCH":
+            # The engine routes SWITCH results by edge "route" metadata.
+            metadata["route"] = e.port
+        lg_edges[e.id] = LGEdge(id=e.id, source=e.source, target=e.target,
+                                metadata=metadata)
+        edge_map[(e.source, e.port)] = (e.id, e.target)
+
+    return LGGraph(nodes=nodes, edges=lg_edges)
+
+
 def compile_flow(flow: Flow) -> CompiledFlow:
     """Build the LoopGraph graph. Raises :class:`FlowValidationError` with a
     friendly message when the engine rejects the graph."""
-    nodes: Dict[str, LGNode] = {}
-    flow_nodes: Dict[str, FlowNode] = {}
-    for n in flow.nodes:
-        # allow_partial_upstream: loop headers have >1 upstream edge and the
-        # engine would otherwise wait for ALL of them (deadlock on cycles).
-        nodes[n.id] = LGNode(
-            id=n.id,
-            kind=_KIND_MAP[BLOCKS[n.block].kind],
-            handler=n.id,
-            allow_partial_upstream=True,
-        )
-        flow_nodes[n.id] = n
-
-    edges: Dict[str, LGEdge] = {}
+    all_flow_nodes: Dict[str, FlowNode] = {}
     edge_map: Dict[Tuple[str, str], Tuple[str, str]] = {}
-    for e in flow.edges:
-        metadata: Dict[str, object] = {"port": e.port}
-        if BLOCKS[flow_nodes[e.source].block].kind == "SWITCH":
-            # The engine routes SWITCH results by edge "route" metadata.
-            metadata["route"] = e.port
-        edges[e.id] = LGEdge(id=e.id, source=e.source, target=e.target,
-                             metadata=metadata)
-        edge_map[(e.source, e.port)] = (e.id, e.target)
+    top_level_ids: Set[str] = set()
+    node_scope: Dict[str, str] = {}
+
+    graph = _compile_scope(flow.nodes, flow.edges, enclosing=None,
+                           all_flow_nodes=all_flow_nodes, edge_map=edge_map,
+                           top_level_ids=top_level_ids, node_scope=node_scope)
 
     try:
-        graph = LGGraph(nodes=nodes, edges=edges)
         graph.validate()
         if graph.nodes and not graph.entry_nodes():
             raise ValueError("Graph has no entry nodes (nodes with no upstream edges)")
@@ -118,7 +208,8 @@ def compile_flow(flow: Flow) -> CompiledFlow:
         raise FlowValidationError([_friendly_engine_error(str(exc))]) from exc
 
     return CompiledFlow(flow=flow, graph=graph, edge_map=edge_map,
-                        nodes=flow_nodes)
+                        nodes=all_flow_nodes, top_level_ids=top_level_ids,
+                        node_scope=node_scope)
 
 
 # ---------- block semantics (prototype tick() parity) ----------
@@ -239,6 +330,17 @@ def _execute_block(node: FlowNode, ctx: Any,
         logs.append(("step", f"{result_name} = {fn_name}({fmt(a)}) → {fmt(r)}"))
         return "out"
 
+    if block == "split":
+        logs.append(("step", "Split — running both branches"))
+        return None  # fan-out: activated edges are structural, not port-driven
+
+    if block == "merge":
+        # payload is the AGGREGATE's list of upstream results; this app
+        # threads state through the shared ctx.vars instead, so the list
+        # itself isn't needed — the join point matters, not its contents.
+        logs.append(("step", "Merge — branches joined"))
+        return "out"
+
     if block == "end":
         logs.append(("ok", "Flow finished — nice!"))
         return None
@@ -248,7 +350,13 @@ def _execute_block(node: FlowNode, ctx: Any,
 
 def _make_handler(compiled: CompiledFlow, node: FlowNode, ctx: Any):
     label = BLOCKS[node.block].label
-    is_switch = BLOCKS[node.block].kind == "SWITCH"
+    spec = BLOCKS[node.block]
+    is_switch = spec.kind == "SWITCH"
+    is_fan_out = spec.fan_out
+    #: only the outermost flow's own "end" block halts the whole run — a
+    #: nested subgraph's "end"/TERMINAL just ends that child graph, which
+    #: LoopGraph does automatically once it runs.
+    halts_on_end = node.id in compiled.top_level_ids
 
     async def handler(payload: Any = None) -> Any:
         await ctx.acquire_credit()
@@ -262,8 +370,19 @@ def _make_handler(compiled: CompiledFlow, node: FlowNode, ctx: Any):
             halt = "error"
 
         if halt is None:
-            if node.block == "end":
-                halt = "end"
+            if is_fan_out:
+                missing = [p for p in node.ports
+                          if (node.id, p) not in compiled.edge_map]
+                if missing:
+                    logs.append(("err",
+                                 f'The "{missing[0]}" arrow of this {label} '
+                                 "block isn’t connected — drag from its dot "
+                                 "to the next block."))
+                    halt = "error"
+            elif node.block == "end":
+                if halts_on_end:
+                    halt = "end"
+                # a nested "end" block just ends its child graph normally
             elif (node.id, port) not in compiled.edge_map:
                 logs.append(("err",
                              f'The "{port}" arrow of this {label} block isn’t '
@@ -278,7 +397,8 @@ def _make_handler(compiled: CompiledFlow, node: FlowNode, ctx: Any):
             halt = "step_limit"
 
         ctx.record(Report(node_id=node.id, port=port, logs=logs,
-                          vars=dict(ctx.vars), step=ctx.steps, halt=halt))
+                          vars=dict(ctx.vars), step=ctx.steps, halt=halt,
+                          fan_out=is_fan_out))
 
         if is_switch:
             # LoopGraph requires switch handlers to return a string route.
@@ -289,13 +409,16 @@ def _make_handler(compiled: CompiledFlow, node: FlowNode, ctx: Any):
 
 
 def build_registry(compiled: CompiledFlow, ctx: Any) -> FunctionRegistry:
-    """One handler per node, registered under the node id.
+    """One handler per node — top-level AND every nested subgraph node.
 
     ``ctx`` is the run context (the session's ``Run``): it must provide
     ``vars``/``loop_counts`` dicts, a ``steps`` int, ``async acquire_credit()``
-    and ``record(report)``.
+    and ``record(report)``. "subgraph" blocks have no handler of their own
+    (LoopGraph runs their embedded child graph directly).
     """
     registry = FunctionRegistry()
-    for node in compiled.flow.nodes:
-        registry.register(node.id, _make_handler(compiled, node, ctx))
+    for node_id, node in compiled.nodes.items():
+        if node.block in NESTED_GRAPH_BLOCKS:
+            continue
+        registry.register(node_id, _make_handler(compiled, node, ctx))
     return registry

@@ -10,8 +10,10 @@ from app.compiler import (_fn_double, _fn_square, _loop_times, build_registry,
                           compile_flow)
 from app.schema import FlowValidationError, parse_flow
 
-from flowdefs import (edge, flow, node, self_loop_flow, shared_loops_flow,
-                      starter_flow)
+from flowdefs import (duplicate_id_subgraph_flow, edge, flow, node,
+                      self_loop_flow, shared_loops_flow, split_merge_flow,
+                      split_merge_loop_subgraph_flow, starter_flow,
+                      subgraph_flow)
 
 STARTER_ORDER = ["n1", "n2", "n3", "n4", "n5", "n6", "n7",
                  "n5", "n6", "n7", "n5", "n6", "n7", "n5", "n8"]
@@ -140,3 +142,96 @@ async def test_real_scheduler_executes_starter_flow_in_order():
     assert ctx.reports[-1].vars == {"name": "Ada", "lap": 4}
     ports = [r.port for r in ctx.reports]
     assert ports[4] == "repeat" and ports[13] == "done" and ports[14] is None
+
+
+# ---------- split / merge / subgraph ----------
+
+async def _run(flow_def):
+    compiled = compile_flow(parse_flow(flow_def))
+    ctx = StubCtx()
+    registry = build_registry(compiled, ctx)
+    scheduler = Scheduler(registry, EventBus(), SemaphorePolicy(limit=1))
+    await scheduler.run(compiled.graph, initial_payload={})
+    return compiled, ctx
+
+
+def test_split_compiles_as_fan_out_task():
+    compiled = compile_flow(parse_flow(split_merge_flow()))
+    graph = compiled.graph
+    assert graph.nodes["n3"].kind is NodeKind.TASK  # split: TASK, not SWITCH
+    assert graph.nodes["n6"].kind is NodeKind.AGGREGATE  # merge
+    assert compiled.edge_map[("n3", "a")] == ("e3", "n4")
+    assert compiled.edge_map[("n3", "b")] == ("e4", "n5")
+    # split's out-edges carry no "route" metadata — both fire unconditionally.
+    assert "route" not in graph.edges["e3"].metadata
+    assert "route" not in graph.edges["e4"].metadata
+
+
+async def test_split_merge_runs_both_branches_and_joins():
+    compiled, ctx = await _run(split_merge_flow())
+    order = [r.node_id for r in ctx.reports]
+    # both branches run (deterministic graph-definition order), then merge
+    assert order == ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]
+    split_report = ctx.reports[2]
+    assert split_report.fan_out is True
+    merge_report = ctx.reports[5]
+    assert merge_report.fan_out is False
+    assert ctx.reports[-1].vars == {"num": 4.0, "squared": 16.0}
+    assert ctx.reports[-1].halt == "end"
+
+
+def test_subgraph_compiles_nested_graph_and_scopes_ids():
+    compiled = compile_flow(parse_flow(subgraph_flow()))
+    graph = compiled.graph
+    assert graph.nodes["n3"].kind is NodeKind.SUBGRAPH
+    assert graph.nodes["n3"].handler == ""
+    assert "graph" in graph.nodes["n3"].config
+    child = graph.nodes["n3"].config["graph"]
+    assert {n["id"] for n in child["nodes"]} == \
+        {"sg_start", "sg_loop", "sg_say", "sg_end"}
+    # every nested node/edge is registered globally, and scoped to n3
+    assert set(compiled.nodes) == {"n1", "n2", "n3", "n4",
+                                   "sg_start", "sg_loop", "sg_say", "sg_end"}
+    assert compiled.node_scope["sg_loop"] == "n3"
+    assert compiled.node_scope["n2"] == "n2"
+    assert compiled.top_level_ids == {"n1", "n2", "n3", "n4"}
+    # the nested "end" block does NOT halt the whole run
+    assert "sg_end" not in compiled.top_level_ids
+
+
+async def test_subgraph_loop_reenters_child_each_visit_without_halting():
+    compiled, ctx = await _run(subgraph_flow())
+    order = [r.node_id for r in ctx.reports]
+    # outer loop visits the subgraph twice; each visit runs the inner 2x loop
+    assert order.count("n3") == 0  # subgraph node itself has no handler
+    assert order.count("sg_start") == 2
+    assert order.count("sg_say") == 4  # 2 inner rounds × 2 outer visits
+    # only the OUTERMOST "end" halts the run
+    halts = [r.halt for r in ctx.reports]
+    assert halts.count("end") == 1
+    assert ctx.reports[-1].node_id == "n4"
+    assert ctx.reports[-1].halt == "end"
+    # the nested end block completed normally, without halting
+    sg_end_reports = [r for r in ctx.reports if r.node_id == "sg_end"]
+    assert len(sg_end_reports) == 2
+    assert all(r.halt is None for r in sg_end_reports)
+
+
+async def test_split_merge_loop_subgraph_full_demo_shape():
+    """The example-demo topology end to end: fan-out+merge -> loop whose
+    body is a subgraph node that is itself a loop."""
+    compiled, ctx = await _run(split_merge_loop_subgraph_flow())
+    order = [r.node_id for r in ctx.reports]
+    assert order[:3] == ["n1", "n2", "n3"]
+    assert set(order[3:5]) == {"n4", "n5"}  # both branches, order deterministic
+    assert order[5] == "n6"  # merge
+    assert order.count("n7") == 3  # 2x "repeat" + 1x "done"
+    assert order.count("sg_start") == 2  # subgraph visited twice
+    assert ctx.reports[-1].node_id == "n9"
+    assert ctx.reports[-1].halt == "end"
+
+
+def test_duplicate_id_across_scopes_is_rejected():
+    with pytest.raises(FlowValidationError) as exc:
+        compile_flow(parse_flow(duplicate_id_subgraph_flow()))
+    assert any('share the id "n2"' in e for e in exc.value.errors)

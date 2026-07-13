@@ -7,8 +7,8 @@ from app.main import app
 
 from flowdefs import (bad_expr_flow, empty_expr_flow, fn_flow, iff_flow,
                       infinite_flow, infinity_loop_flow, nan_fn_flow, node,
-                      starter_flow, unconnected_flow, shared_loops_flow,
-                      while_flow)
+                      split_merge_loop_subgraph_flow, starter_flow,
+                      unconnected_flow, shared_loops_flow, while_flow)
 
 client = TestClient(app)
 
@@ -464,6 +464,61 @@ def test_deeply_nested_json_frame_gets_friendly_error_socket_alive():
         # socket is still usable: run a full flow afterwards
         started, events = step_run(ws, while_flow())
         assert events[-1]["reason"] == "end"
+
+
+# ---------- split / merge / subgraph over the real WebSocket ----------
+
+def step_run_lenient(ws, flow, max_credits=80, max_events=80):
+    """Like step_run, but for flows containing a fan-out ("split"): one
+    step credit can legitimately produce more than one tick (one per
+    activated edge), so sends and receives aren't 1:1. Over-supplying
+    credits up front is harmless — SemaphorePolicy(limit=1) still allows
+    only one handler in flight, so dispatch order stays deterministic."""
+    ws.send_json({"type": "start", "flow": flow, "mode": "step", "speed": 1})
+    started = ws.receive_json()
+    assert started["type"] == "started", started
+    for _ in range(max_credits):
+        ws.send_json({"type": "step"})
+    events = []
+    for _ in range(max_events):
+        message = receive_strict_json(ws)
+        events.append(message)
+        if message["type"] != "tick":
+            break
+    return started, events
+
+
+def test_split_merge_loop_subgraph_over_websocket():
+    with client.websocket_connect("/api/runs") as ws:
+        started, events = step_run_lenient(ws, split_merge_loop_subgraph_flow())
+
+    assert events[-1]["type"] == "finished"
+    assert events[-1]["reason"] == "end"
+    executed = [e["executed"] for e in events]
+    # n3 (split) reports twice — once per activated edge
+    assert executed[:4] == ["n1", "n2", "n3", "n3"]
+    assert set(executed[4:6]) == {"n4", "n5"}
+    assert executed[6] == "n6"
+    # the split's two ticks share one step count and only the first logs
+    split_ticks = [e for e in events if e["executed"] == "n3"]
+    assert len(split_ticks) == 2
+    assert split_ticks[0]["step"] == split_ticks[1]["step"]
+    assert split_ticks[0]["logs"] == [{"kind": "step",
+                                       "text": "Split — running both branches"}]
+    assert split_ticks[1]["logs"] == []
+    assert {split_ticks[0]["port"], split_ticks[1]["port"]} == {"a", "b"}
+    # canvas stays on the subgraph node ("n8") for every inner tick
+    inner_node_ids = {"sg_start", "sg_loop", "sg_say", "sg_end"}
+    inner_ticks = [e for e in events if e["executed"] in inner_node_ids]
+    assert len(inner_ticks) > 0
+    assert all(e["next"] == "n8" or e["executed"] == "sg_end"
+              for e in inner_ticks)
+    exit_ticks = [e for e in inner_ticks if e["executed"] == "sg_end"]
+    assert all(e["next"] == "n7" for e in exit_ticks)
+    # the run really executed the inner loop twice per subgraph visit
+    say_texts = [l["text"] for e in events for l in e["logs"]
+                if l["text"] == "inner round"]
+    assert len(say_texts) == 4  # 2 outer visits × 2 inner rounds
 
 
 # ---------- validate endpoint ----------

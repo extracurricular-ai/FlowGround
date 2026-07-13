@@ -7,11 +7,18 @@ One :class:`Session` per socket; at most one active :class:`Run`.  A Run owns:
   ``SPEEDS[speed]`` ms; step mode releases one credit per ``step`` message),
 - the outbound message queue (shared with the socket's sender task).
 
-Fidelity: ``tick`` ordering and the ``next`` field are derived from the
-engine's own ``EventBus`` events — the tick for node A is emitted when the
-engine emits ``NODE_SCHEDULED`` for the next node B, pairing A's recorded
-report with the observed B.  If the engine's observed next disagrees with the
-static edge map, the engine wins.
+Fidelity: every ``tick`` is emitted the moment a node's real handler
+completes and calls :meth:`Run.record` — i.e. only after the engine's own
+credit-gated dispatch actually ran that node, never before. The ``next``
+field is the real activated edge's target (per LoopGraph's documented
+deterministic, graph-definition-order dispatch, a (node, port) pair maps to
+exactly one edge by construction, so this is not a prediction). This
+replaced an earlier design that paired each report with the *following*
+``NODE_SCHEDULED`` event: that pairing broke for a genuine merge (two
+branches both completing before their shared ``AGGREGATE`` target is
+scheduled just once) — a 1:1 report↔event assumption that fan-out/fan-in
+topologies violate. Emitting immediately at completion never drops or
+misattributes a report, for any topology.
 """
 
 from __future__ import annotations
@@ -21,9 +28,8 @@ import json
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from loopgraph.bus.eventbus import Event, EventBus
+from loopgraph.bus.eventbus import EventBus
 from loopgraph.concurrency import SemaphorePolicy
-from loopgraph.core.types import EventType
 from loopgraph.scheduler.scheduler import Scheduler
 
 from .compiler import CompiledFlow, Report, build_registry, compile_flow
@@ -79,11 +85,12 @@ class Run:
         self.steps = 0
 
         self.credits = asyncio.Semaphore(0)
-        self.pending: Optional[Report] = None
+        #: the most recently recorded report — only used by the "engine
+        #: stopped without a proper halt" fallback paths below.
+        self._last_report: Optional[Report] = None
         self.finished = False
 
         self.bus = EventBus()
-        self.bus.subscribe(None, self._on_engine_event)
         registry = build_registry(compiled, self)
         self.scheduler = Scheduler(registry, self.bus, SemaphorePolicy(limit=1))
 
@@ -118,8 +125,7 @@ class Run:
             if not self.finished:
                 # The engine ran out of work without any block halting —
                 # should be unreachable for well-formed flows.
-                rep = self.pending
-                self.pending = None
+                rep = self._last_report
                 if rep is not None:
                     self._finish(Report(rep.node_id, rep.port,
                                         rep.logs + [("err", "The flow stopped unexpectedly.")],
@@ -130,8 +136,7 @@ class Run:
                                         dict(self.vars), self.steps, "error"))
 
     def _finish_engine_error(self, exc: Exception) -> None:
-        rep = self.pending
-        self.pending = None
+        rep = self._last_report
         message = ("err", f"The LoopGraph engine stopped this flow: {exc}")
         if rep is not None:
             self._finish(Report(rep.node_id, rep.port, rep.logs + [message],
@@ -148,36 +153,52 @@ class Run:
     def record(self, report: Report) -> None:
         if self.finished:
             return
+        self._last_report = report
         if report.halt is not None:
             self._finish(report)
-        else:
-            self.pending = report
-
-    # ---- engine observation ----
-
-    async def _on_engine_event(self, event: Event) -> None:
-        if self.finished or event.type is not EventType.NODE_SCHEDULED:
             return
-        rep = self.pending
-        if rep is None:
-            # First scheduling of the entry node: the client already
-            # highlights `entry` from the `started` message.
-            return
-        self.pending = None
-        edge = self.compiled.edge_map.get((rep.node_id, rep.port))
-        # `next` comes from the ENGINE's scheduling decision; edgeId stays the
-        # static (executed, port) edge per PROTOCOL.md.
-        self.session.send({
-            "type": "tick",
-            "runId": self.run_id,
-            "executed": rep.node_id,
-            "port": rep.port,
-            "next": event.node_id,
-            "edgeId": edge[0] if edge else None,
-            "step": rep.step,
-            "logs": _logs_json(rep.logs),
-            "vars": _json_vars(rep.vars),
-        })
+        for i, (port, edge_id, target) in enumerate(self._activated_edges(report)):
+            self.session.send({
+                "type": "tick",
+                "runId": self.run_id,
+                "executed": report.node_id,
+                "port": port,
+                "next": self.compiled.node_scope.get(target, target),
+                "edgeId": edge_id,
+                "step": report.step,
+                # only the first tick for a report carries its logs — a
+                # fan-out (or two branches converging on one merge) must
+                # never narrate the same completion twice.
+                "logs": _logs_json(report.logs) if i == 0 else [],
+                "vars": _json_vars(report.vars),
+            })
+
+    def _activated_edges(self, report: Report) -> List[Tuple[Optional[str], str, str]]:
+        """(port, edge id, target node id) for every edge this report's node
+        activates. A "split" activates all of its out-edges at once; every
+        other block activates exactly the one edge for its returned port."""
+        node_id = report.node_id
+        if report.fan_out:
+            return [(port, edge_id, target)
+                    for (source, port), (edge_id, target)
+                    in self.compiled.edge_map.items() if source == node_id]
+        edge = self.compiled.edge_map.get((node_id, report.port))
+        if edge is not None:
+            return [(report.port, edge[0], edge[1])]
+        # No static out-edge from this exact node: this is a nested
+        # subgraph's own "end"/TERMINAL block, which never has out-edges of
+        # its own. LoopGraph completes the enclosing SUBGRAPH node with the
+        # child's payload and fires ITS downstream edge instead — surface
+        # that edge here so the tick still shows where control goes next.
+        enclosing = self.compiled.node_scope.get(node_id)
+        if enclosing is not None and enclosing != node_id:
+            enclosing_node = self.compiled.nodes.get(enclosing)
+            if enclosing_node is not None:
+                for port in enclosing_node.ports:
+                    edge = self.compiled.edge_map.get((enclosing, port))
+                    if edge is not None:
+                        return [(port, edge[0], edge[1])]
+        return []
 
     def _finish(self, report: Report) -> None:
         self.finished = True

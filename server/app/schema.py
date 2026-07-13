@@ -12,10 +12,14 @@ FORMAT = "flowground.v1"
 
 
 class BlockSpec:
-    def __init__(self, label: str, kind: str, ports: Tuple[str, ...]):
+    def __init__(self, label: str, kind: str, ports: Tuple[str, ...],
+                 fan_out: bool = False):
         self.label = label
         self.kind = kind
         self.ports = ports
+        #: True for blocks whose completion activates ALL of their out-ports
+        #: at once (a real LoopGraph fan-out), rather than exactly one.
+        self.fan_out = fan_out
 
 
 #: block → (label, required loopgraph kind, out-ports) — PROTOCOL.md table.
@@ -28,7 +32,14 @@ BLOCKS: Dict[str, BlockSpec] = {
     "loop": BlockSpec("Loop", "SWITCH", ("repeat", "done")),
     "fn": BlockSpec("Function", "TASK", ("out",)),
     "end": BlockSpec("End", "TERMINAL", ()),
+    "split": BlockSpec("Split", "TASK", ("a", "b"), fan_out=True),
+    "merge": BlockSpec("Merge", "AGGREGATE", ("out",)),
+    "subgraph": BlockSpec("Subgraph", "SUBGRAPH", ("out",)),
 }
+
+#: blocks whose config carries a nested flowground.v1 flow (JSON-encoded
+#: string in config["graph"]) rather than plain scalar settings.
+NESTED_GRAPH_BLOCKS = {"subgraph"}
 
 
 class FlowNode(BaseModel):
