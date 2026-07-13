@@ -157,13 +157,13 @@ class Run:
         if report.halt is not None:
             self._finish(report)
             return
-        for i, (port, edge_id, target) in enumerate(self._activated_edges(report)):
+        for i, (executed, port, edge_id, target) in enumerate(self._activated_edges(report)):
             self.session.send({
                 "type": "tick",
                 "runId": self.run_id,
-                "executed": report.node_id,
+                "executed": executed,
                 "port": port,
-                "next": self.compiled.node_scope.get(target, target),
+                "next": target,
                 "edgeId": edge_id,
                 "step": report.step,
                 # only the first tick for a report carries its logs — a
@@ -173,27 +173,38 @@ class Run:
                 "vars": _json_vars(report.vars),
             })
 
-    def _activated_edges(self, report: Report) -> List[Tuple[Optional[str], str, str]]:
-        """(port, edge id, target node id) for every edge this report's node
-        activates. A "split" activates all of its out-edges at once; every
-        other block activates exactly the one edge for its returned port."""
+    def _activated_edges(
+        self, report: Report
+    ) -> List[Tuple[str, Optional[str], str, str]]:
+        """(executed node id, port, edge id, target node id) for every edge
+        this report's node activates. A "split" activates all of its
+        out-edges at once; every other block activates exactly the one edge
+        for its returned port. ``next``/``executed`` are the real node ids —
+        including nested-subgraph ones — so the client can highlight a
+        subgraph block's own inner nodes and edges, not just the block
+        itself."""
         node_id = report.node_id
         if report.fan_out:
-            return [(port, edge_id, target)
+            return [(node_id, port, edge_id, target)
                     for (source, port), (edge_id, target)
                     in self.compiled.edge_map.items() if source == node_id]
         edge = self.compiled.edge_map.get((node_id, report.port))
         if edge is not None:
-            return [(report.port, edge[0], edge[1])]
+            return [(node_id, report.port, edge[0], edge[1])]
         # No static out-edge from this exact node: this is a nested
         # subgraph's own "end"/TERMINAL block, which never has out-edges of
         # its own. LoopGraph completes the enclosing SUBGRAPH node with the
-        # child's payload and fires ITS downstream edge instead — surface
-        # that edge here so the tick still shows where control goes next.
-        # This must be the DIRECT parent (parent_scope), not the outermost
-        # top-level ancestor (node_scope) — those differ once subgraphs nest
-        # two or more levels deep, and using the wrong one would skip the
-        # intermediate subgraph's own transition entirely.
+        # child's payload and fires ITS downstream edge instead. Report
+        # `executed` as the SUBGRAPH node itself, not the raw inner terminal
+        # id — LoopGraph's own contract is that "a sub-workflow is just
+        # another task" from the parent's perspective, so this is the
+        # faithful framing of this transition, and it's also the only one
+        # the client can resolve to a real edge (no local edge originates
+        # from an inner node's id). This must be the DIRECT parent
+        # (parent_scope), not the outermost top-level ancestor (node_scope)
+        # — those differ once subgraphs nest two or more levels deep, and
+        # using the wrong one would skip the intermediate subgraph's own
+        # transition entirely.
         parent = self.compiled.parent_scope.get(node_id)
         if parent is not None:
             parent_node = self.compiled.nodes.get(parent)
@@ -201,7 +212,7 @@ class Run:
                 for port in parent_node.ports:
                     edge = self.compiled.edge_map.get((parent, port))
                     if edge is not None:
-                        return [(port, edge[0], edge[1])]
+                        return [(parent, port, edge[0], edge[1])]
         return []
 
     def _finish(self, report: Report) -> None:

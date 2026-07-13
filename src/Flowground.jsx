@@ -151,9 +151,66 @@ export default class Flowground extends React.Component {
     return [{port:'out',label:'',color:this.TYPES[type].color}];
   }
   outAnchor(n, port) {
+    const sz = this.boxSizeFor(n);
     const ps = this.portsOf(n.type);
-    if (ps.length === 2) return {x: n.x + (port === ps[0].port ? 37 : 151), y: n.y + 58};
-    return {x: n.x + 94, y: n.y + 58};
+    if (ps.length === 2) return {x: n.x + sz.w * (port === ps[0].port ? 0.197 : 0.803), y: n.y + sz.h};
+    return {x: n.x + sz.w / 2, y: n.y + sz.h};
+  }
+  // A subgraph block renders its REAL inner structure (PROTOCOL.md: ticks
+  // carry true inner-node ids, never remapped) rather than an opaque box, so
+  // it needs a bigger, content-sized footprint. Every other block keeps the
+  // original fixed chip size.
+  boxSizeFor(n) {
+    if (n.type === 'subgraph') {
+      const L = this.miniLayoutFor(n);
+      if (L) return {w: Math.max(188, L.width), h: Math.max(58, L.height)};
+    }
+    return {w: 188, h: 58};
+  }
+  miniLayoutFor(n) {
+    try { return this.miniLayout(JSON.parse(n.data.graph)); } catch (e) { return null; }
+  }
+  // Layered top-to-bottom layout for a nested flowground.v1 flow: BFS from
+  // `entry` over forward edges (to a not-yet-visited node) assigns each node
+  // a row; an edge to an already-assigned node is a back-edge (a loop),
+  // rendered as a curved return rather than a straight line down.
+  miniLayout(graphDef) {
+    const byId = {}; graphDef.nodes.forEach(function(gn){ byId[gn.id] = gn; });
+    const out = {}; graphDef.nodes.forEach(function(gn){ out[gn.id] = []; });
+    graphDef.edges.forEach(function(e){ (out[e.source] || (out[e.source] = [])).push(e); });
+    const layer = {}; layer[graphDef.entry] = 0;
+    const order = [graphDef.entry];
+    const queue = [graphDef.entry];
+    while (queue.length) {
+      const id = queue.shift();
+      (out[id] || []).forEach(function(e) {
+        if (layer[e.target] == null) {
+          layer[e.target] = layer[id] + 1;
+          order.push(e.target);
+          queue.push(e.target);
+        }
+      });
+    }
+    const rowH = 52, colW = 92, padX = 14, padTop = 32;
+    const byLayer = {};
+    order.forEach(function(id){ (byLayer[layer[id]] = byLayer[layer[id]] || []).push(id); });
+    const pos = {};
+    let maxCols = 1;
+    Object.keys(byLayer).forEach(function(l) {
+      const ids = byLayer[l];
+      maxCols = Math.max(maxCols, ids.length);
+      ids.forEach(function(id, i){ pos[id] = {x: padX + i * colW + 30, y: padTop + Number(l) * rowH}; });
+    });
+    const maxLayer = order.reduce(function(m, id){ return Math.max(m, layer[id]); }, 0);
+    return {
+      byId: byId, pos: pos, order: order,
+      edges: graphDef.edges.map(function(e){
+        return {source: e.source, port: e.port, target: e.target,
+                back: layer[e.target] <= layer[e.source]};
+      }),
+      width: padX * 2 + maxCols * colW,
+      height: padTop + (maxLayer + 1) * rowH + 12
+    };
   }
   fmt(v, bare) {
     // JSON cannot carry non-finite numbers; the server encodes them as
@@ -188,7 +245,12 @@ export default class Flowground extends React.Component {
     this.unlock('wire');
   }
   hitNode(x, y, excludeId) {
-    return this.state.nodes.find(function(n){ return n.id !== excludeId && n.type !== 'start' && x >= n.x - 8 && x <= n.x + 196 && y >= n.y - 10 && y <= n.y + 66; });
+    const self = this;
+    return this.state.nodes.find(function(n){
+      if (n.id === excludeId || n.type === 'start') return false;
+      const sz = self.boxSizeFor(n);
+      return x >= n.x - 8 && x <= n.x + sz.w + 8 && y >= n.y - 10 && y <= n.y + sz.h + 8;
+    });
   }
   deleteNode(id) {
     this.setState(function(s){ return {nodes: s.nodes.filter(function(n){ return n.id !== id; }), edges: s.edges.filter(function(e){ return e.from.node !== id && e.to !== id; }), selNode:null}; });
@@ -270,7 +332,7 @@ export default class Flowground extends React.Component {
     this._pendingStart = null;
     this.setState(function(s){ return {
       console: s.console.concat([{kind:'err', text:SERVER_DOWN_MSG}]).slice(-200),
-      running:false, paused:false, curId:null, activeEdge:null
+      running:false, paused:false, curId:null, activeEdges:{}
     }; });
   }
   onServerLost() {
@@ -324,7 +386,7 @@ export default class Flowground extends React.Component {
     this._runGen++;
     this._pendingStart = null;
     if (this._rc) this._rc.send({type:'reset'});
-    this.setState({running:false, paused:false, curId:null, activeEdge:null, vars:{}, steps:0, console:[]});
+    this.setState({running:false, paused:false, curId:null, activeEdges:{}, vars:{}, steps:0, console:[]});
   }
   unlocksFor(msg) {
     const unlocks = [];
@@ -337,6 +399,18 @@ export default class Flowground extends React.Component {
     }
     return unlocks;
   }
+  // Drop any active edge whose TARGET is `reachedId` — execution has now
+  // actually reached the far end of it, so it's been "consumed". Edges NOT
+  // targeting `reachedId` (e.g. a split's other, still-pending branch, or a
+  // merge's other still-in-flight input) are left untouched — they stay lit
+  // until their own target is reached by a later tick. This is what lets a
+  // fan-out show both branches active at once and a merge show both incoming
+  // edges lit right up until it runs, instead of one clobbering the other.
+  consumeEdgesInto(activeEdges, reachedId) {
+    const next = {};
+    Object.keys(activeEdges).forEach(function(k){ if (activeEdges[k] !== reachedId) next[k] = activeEdges[k]; });
+    return next;
+  }
   onServerEvent(msg) {
     const self = this;
     if (msg.type === 'error') {
@@ -344,7 +418,7 @@ export default class Flowground extends React.Component {
       this._pendingStart = null;
       this.setState(function(s){ return {
         console: s.console.concat([{kind:'err', text:String(msg.message)}]).slice(-200),
-        running: false, paused: false, curId: null, activeEdge: null
+        running: false, paused: false, curId: null, activeEdges: {}
       }; });
       return;
     }
@@ -356,21 +430,24 @@ export default class Flowground extends React.Component {
       this._pendingStart = null;
       this.setState({
         running: true, paused: msg.mode === 'step',
-        curId: msg.entry, activeEdge: null,
+        curId: msg.entry, activeEdges: {},
         console: (msg.logs || []).slice(-200),
         vars: {}, steps: 0
       });
     } else if (msg.type === 'tick') {
       const unlocks = this.unlocksFor(msg);
-      // Server edge ids are positional (e{index+1} over the wire-format edge array) and
-      // need not match local ids, which are random for user-drawn edges — resolve the
-      // animated edge locally from (executed, port) instead.
+      // `executed`/`port`/`next` are always real node ids (PROTOCOL.md) —
+      // including nested-subgraph ones — so this same edge-key scheme
+      // (source>port) covers top-level AND a subgraph's own inner edges
+      // uniformly; clients resolve which drawn edge a key belongs to at
+      // render time (buildEdgesSvg / the subgraph's mini-edges), not here.
       this.setState(function(s){
-        const edge = s.edges.find(function(e){ return e.from.node === msg.executed && e.from.port === msg.port; });
+        const activeEdges = self.consumeEdgesInto(s.activeEdges, msg.executed);
+        if (msg.port != null) activeEdges[msg.executed + '>' + msg.port] = msg.next;
         return {
           console: s.console.concat(msg.logs || []).slice(-200),
           vars: msg.vars || {},
-          curId: msg.next, activeEdge: edge ? edge.id : null, steps: msg.step
+          curId: msg.next, activeEdges: activeEdges, steps: msg.step
         };
       });
       unlocks.forEach(function(u){ self.unlock(u); });
@@ -381,7 +458,7 @@ export default class Flowground extends React.Component {
       this.setState(function(s){ return {
         console: s.console.concat(msg.logs || []).slice(-200),
         vars: msg.vars || {},
-        running: false, paused: false, curId: null, activeEdge: null, steps: msg.step
+        running: false, paused: false, curId: null, activeEdges: {}, steps: msg.step
       }; });
       unlocks.forEach(function(u){ self.unlock(u); });
     }
@@ -544,9 +621,9 @@ export default class Flowground extends React.Component {
       const a = byId[e.from.node], b = byId[e.to]; if (!a || !b) return;
       const back = b.y < a.y + 30;
       const p1 = self.outAnchor(a, e.from.port);
-      const p2 = {x: b.x + 94 + (back ? 36 : 0), y: b.y - 2};
+      const p2 = {x: b.x + self.boxSizeFor(b).w / 2 + (back ? 36 : 0), y: b.y - 2};
       const pb = self.pathBetween(p1, p2);
-      const active = st.activeEdge === e.id && st.running;
+      const active = st.running && st.activeEdges[e.from.node + '>' + e.from.port] === e.to;
       const sel = st.selEdge === e.id;
       const col = active ? acc : (sel ? '#43382E' : '#C9B99F');
       const marker = active ? 'aha' : (sel ? 'ahs' : 'ahd');
@@ -618,22 +695,68 @@ export default class Flowground extends React.Component {
       }
     };
 
+    // A subgraph block shows its REAL inner nodes/edges (PROTOCOL.md: ticks
+    // carry true inner ids, never remapped to the block's own id) instead of
+    // an opaque box, so the run can be watched inside it with the same
+    // fidelity as the main canvas.
+    const buildMini = function(n) {
+      let graphDef; try { graphDef = JSON.parse(n.data.graph); } catch (e) { return null; }
+      const L = self.miniLayout(graphDef);
+      const HEAD = 30;
+      const miniNodes = L.order.map(function(id) {
+        const gn = L.byId[id];
+        const mt = self.TYPES[gn.block] || {glyph:'?', color:'#8B8178'};
+        const p = L.pos[id];
+        const on = st.running && st.curId === id;
+        return {
+          id: id, label: mt.glyph, title: gn.id,
+          style: {position:'absolute', left:p.x - 26, top:p.y + HEAD - 15, width:52, height:30,
+            borderRadius:8, background:'#FFFDF8', display:'grid', placeItems:'center',
+            border:'1.5px solid ' + (on ? acc : mt.color + '80'),
+            boxShadow: on ? '0 0 0 3px ' + acc + '38' : 'none',
+            font:"800 13px 'Nunito',sans-serif", color: mt.color, zIndex:2,
+            transition:'box-shadow .2s, border-color .2s'}
+        };
+      });
+      const miniEdges = L.edges.map(function(e, i) {
+        const p1 = L.pos[e.source], p2 = L.pos[e.target];
+        const on = st.running && st.activeEdges[e.source + '>' + e.port] === e.target;
+        // A back-edge (loop-back) points to an EARLIER layer — connect the
+        // two nodes' right sides with a rightward bulge, instead of the
+        // straight top-to-bottom line forward edges use.
+        const d = e.back
+          ? 'M ' + (p1.x + 26) + ' ' + (p1.y + HEAD) + ' C ' + (p1.x + 66) + ' ' + (p1.y + HEAD) + ', '
+              + (p2.x + 66) + ' ' + (p2.y + HEAD) + ', ' + (p2.x + 26) + ' ' + (p2.y + HEAD)
+          : 'M ' + p1.x + ' ' + (p1.y + HEAD + 15) + ' L ' + p2.x + ' ' + (p2.y + HEAD - 15);
+        return {key:'me' + i, d:d, stroke: on ? acc : '#D8C7AE', strokeWidth: on ? 2.5 : 1.75,
+          dash: on ? '7 5' : null, animate: on};
+      });
+      return {width:L.width, height:L.height + HEAD, headerH:HEAD, order:L.order,
+        nodes:miniNodes, edges:miniEdges};
+    };
+
     const nodes = st.nodes.map(function(n) {
       const T = self.TYPES[n.type];
       const sel = st.selNode === n.id;
-      const active = st.curId === n.id && st.running;
+      const mini = n.type === 'subgraph' ? buildMini(n) : null;
+      const sz = self.boxSizeFor(n);
+      const active = st.running && (st.curId === n.id || (mini && mini.order.indexOf(st.curId) !== -1));
       const ps = self.portsOf(n.type);
       return {
-        id: n.id, glyph: T.glyph, title: T.label, sub: subOf(n),
+        id: n.id, glyph: T.glyph, title: T.label, sub: subOf(n), mini: mini,
         chipStyle: chip(T.color, 30),
-        wrapStyle: {position:'absolute', left:n.x, top:n.y, width:188, height:58, boxSizing:'border-box',
-          display:'flex', alignItems:'center', gap:10, padding:'0 12px', background:'#FFFDF8',
+        wrapStyle: {position:'absolute', left:n.x, top:n.y, width:sz.w, height:sz.h, boxSizing:'border-box',
+          display: mini ? 'block' : 'flex', alignItems:'center', gap:10,
+          padding: mini ? 0 : '0 12px', background: mini ? '#FBF6ED' : '#FFFDF8',
           border:'1.5px solid ' + (active ? acc : (sel ? '#43382E' : T.color + '59')), borderRadius:14,
           cursor:'grab', userSelect:'none', zIndex: sel || active ? 3 : 2,
           boxShadow: active ? '0 0 0 4px ' + acc + '40, 0 8px 20px rgba(120,70,30,.2)'
                             : (sel ? '0 6px 16px rgba(90,60,30,.16)' : '0 2px 6px rgba(120,80,40,.08)'),
           transition:'box-shadow .2s, border-color .2s'},
-        portRowStyle: {position:'absolute', top:51, left:0, right:0, display:'flex',
+        headerStyle: {position:'absolute', left:0, top:0, right:0, height:mini ? mini.headerH : 0,
+          display:'flex', alignItems:'center', gap:7, padding:'0 10px', borderBottom:'1.5px dashed ' + T.color + '40'},
+        miniAreaStyle: {position:'absolute', left:0, top:0, right:0, bottom:0},
+        portRowStyle: {position:'absolute', top:sz.h - 7, left:0, right:0, display:'flex',
           justifyContent: ps.length === 2 ? 'space-between' : 'center', padding: ps.length === 2 ? '0 30px' : 0, pointerEvents:'none'},
         ports: ps.map(function(p) {
           return {label:p.label,
@@ -870,13 +993,34 @@ export default class Flowground extends React.Component {
                 {v.edgesSvg}
                 {v.nodes.map((n) => (
                   <div key={n.id} onMouseDown={n.onMouseDown} style={n.wrapStyle}>
-                    <div style={n.chipStyle}>{n.glyph}</div>
-                    <div style={{display:'flex',flexDirection:'column',gap:1,minWidth:0,flex:1}}>
-                      <div style={{font:"800 13px 'Nunito',sans-serif",color:'#43382E',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.title}</div>
-                      {n.sub ? (
-                        <div style={{font:'600 10.5px ui-monospace,Menlo,monospace',color:'#93826D',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.sub}</div>
-                      ) : null}
-                    </div>
+                    {n.mini ? (
+                      <React.Fragment>
+                        <div style={n.headerStyle}>
+                          <div style={n.chipStyle}>{n.glyph}</div>
+                          <span style={{font:"800 12px 'Nunito',sans-serif",color:'#43382E',whiteSpace:'nowrap'}}>{n.title}</span>
+                        </div>
+                        <svg width={n.mini.width} height={n.mini.height} style={{position:'absolute',left:0,top:0,pointerEvents:'none',overflow:'visible'}}>
+                          {n.mini.edges.map((e) => (
+                            <path key={e.key} d={e.d} stroke={e.stroke} strokeWidth={e.strokeWidth} fill="none"
+                              strokeDasharray={e.dash} strokeLinecap="round"
+                              style={e.animate ? {animation:'flowdash .55s linear infinite'} : null}></path>
+                          ))}
+                        </svg>
+                        {n.mini.nodes.map((mn) => (
+                          <div key={mn.id} title={mn.title} style={mn.style}>{mn.label}</div>
+                        ))}
+                      </React.Fragment>
+                    ) : (
+                      <React.Fragment>
+                        <div style={n.chipStyle}>{n.glyph}</div>
+                        <div style={{display:'flex',flexDirection:'column',gap:1,minWidth:0,flex:1}}>
+                          <div style={{font:"800 13px 'Nunito',sans-serif",color:'#43382E',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.title}</div>
+                          {n.sub ? (
+                            <div style={{font:'600 10.5px ui-monospace,Menlo,monospace',color:'#93826D',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.sub}</div>
+                          ) : null}
+                        </div>
+                      </React.Fragment>
+                    )}
                     <div style={n.portRowStyle}>
                       {n.ports.map((p, i) => (
                         <div key={i} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>

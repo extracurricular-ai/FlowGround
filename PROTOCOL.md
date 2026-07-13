@@ -75,18 +75,29 @@ it is NEVER sent to the server (client-supplied code = RCE).
   once. Both branches that fed it get their own ordinary tick showing `next` = the merge
   node's id — nothing is dropped, nothing is double-counted.
 - **subgraph** embeds a complete nested flow. Server-side, its inner nodes compile and run
-  exactly like top-level ones (same block vocabulary, same shared variables/console), but the
-  canvas has no boxes for them: every inner tick's `next` is remapped to the enclosing
-  subgraph block's own id, so that block stays highlighted for the whole child-graph run while
-  the console narrates its real steps (e.g. real `Loop — round 1 of 2` lines from the inner
-  loop). The one tick where control returns to the parent (the child's own `end`/`TERMINAL`
-  completing) reports `next` as the parent's real downstream node — but `executed` stays the
-  literal inner node id, so — as a deliberate, documented simplification — that specific
-  transition's edge does not animate (no local canvas edge originates from an inner node's
-  id). A nested `end` block ends only that child graph (LoopGraph's own subgraph contract);
-  only the outermost flow's `end` halts the whole run.
+  exactly like top-level ones (same block vocabulary, same shared variables/console), and
+  their ticks carry their own REAL ids throughout — `executed`/`next` are never remapped to
+  the enclosing subgraph block's id. The client is expected to render a subgraph block as a
+  container showing its actual inner nodes/edges (not an opaque box), and highlight whichever
+  inner node/edge a tick names — full fidelity to the engine's real nested execution, not a
+  flattened summary of it. The one exception: the tick for the moment the child graph's own
+  `end`/`TERMINAL` completes reports `executed` as the ENCLOSING subgraph node's id, not the
+  literal inner terminal id — this is not a simplification but the more faithful framing,
+  since LoopGraph's own contract is that "a sub-workflow is just another task" from the
+  parent's perspective (the terminal's payload becomes the *subgraph node's* result, and the
+  subgraph node's own out-edge is what genuinely fires next); it also happens to be the only
+  framing whose edge a client can resolve to a real, drawn edge and animate. A nested `end`
+  block ends only that child graph (LoopGraph's own subgraph contract); only the outermost
+  flow's `end` halts the whole run.
 - Node/edge ids must be globally unique across a flow and every subgraph nested inside it,
   at any depth — the server rejects a collision with a friendly error.
+- A `split` (or any node with multiple simultaneously-activated out-edges) sends its several
+  ticks back-to-back, all sharing one `step`. Clients must treat "active edges/nodes" as
+  accumulating, not single-valued: an edge becomes active when its tick names it and stays
+  active until a *later* tick's `executed` matches that edge's own target (i.e. until
+  execution actually reaches the far end) — never cleared just because a different edge fired
+  in between. This is what makes a fan-out show both branches lit at once, and a merge show
+  both incoming edges lit together right up until the merge itself runs.
 
 ## HTTP endpoints
 
@@ -152,8 +163,9 @@ Server cancels the active run when the socket closes.
   numbers, which JSON cannot carry, are encoded as `{"__js": "NaN"|"Infinity"|"-Infinity"}`
   and rendered bare by clients). One `tick` = one atomic UI update, but one node completion
   is not always one tick: a `split` produces one tick per activated edge (see "Fan-out and
-  merge ticks" above), and `next`/`executed` for a subgraph's inner nodes are scoped to the
-  enclosing subgraph block. `tick` and `finished` carry the run's `runId`.
+  merge ticks" above). `executed`/`next` are always real node ids — including nested-subgraph
+  ones — except the single exit tick documented there. `tick` and `finished` carry the run's
+  `runId`.
 - `finished` is a final tick: `reason` = `"end"` (reached End block) | `"error"` (flow
   error, see wording below) | `"step_limit"` (150 steps). Its `logs` carry the closing
   line(s). UI clears highlight/edge, `running=false`.

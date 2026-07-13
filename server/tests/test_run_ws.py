@@ -507,14 +507,21 @@ def test_split_merge_loop_subgraph_over_websocket():
                                        "text": "Split — running both branches"}]
     assert split_ticks[1]["logs"] == []
     assert {split_ticks[0]["port"], split_ticks[1]["port"]} == {"a", "b"}
-    # canvas stays on the subgraph node ("n8") for every inner tick
+    # inner ticks carry their TRUE ids/edges (not remapped to "n8") so the
+    # client can render and highlight the subgraph's own inner nodes/edges.
     inner_node_ids = {"sg_start", "sg_loop", "sg_say", "sg_end"}
     inner_ticks = [e for e in events if e["executed"] in inner_node_ids]
     assert len(inner_ticks) > 0
-    assert all(e["next"] == "n8" or e["executed"] == "sg_end"
-              for e in inner_ticks)
-    exit_ticks = [e for e in inner_ticks if e["executed"] == "sg_end"]
-    assert all(e["next"] == "n7" for e in exit_ticks)
+    assert all(e["next"] in inner_node_ids for e in inner_ticks)
+    # the child graph's own TERMINAL (sg_end) completing is reported as the
+    # ENCLOSING subgraph node ("n8") — the only framing whose edge the
+    # client can actually resolve and animate (no local edge originates
+    # from an inner node's id), and the faithful one per LoopGraph's own
+    # contract ("a sub-workflow is just another task" to the parent).
+    exit_ticks = [e for e in events if e["executed"] == "n8"]
+    assert len(exit_ticks) == 2  # once per outer loop visit
+    assert all(e["port"] == "out" and e["next"] == "n7" and e["edgeId"]
+              for e in exit_ticks)
     # the run really executed the inner loop twice per subgraph visit
     say_texts = [l["text"] for e in events for l in e["logs"]
                 if l["text"] == "inner round"]

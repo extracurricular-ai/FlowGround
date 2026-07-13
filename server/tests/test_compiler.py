@@ -261,9 +261,12 @@ def test_doubly_nested_subgraph_scopes_are_correct():
 
 
 async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
-    """The regression this guards: b_end (2 levels deep) completing must
-    resolve to a_sub's own out-edge (-> a_mid), NOT skip straight to n2's
-    out-edge (-> n3) just because node_scope flattens both to n2."""
+    """The regression this guards: b_end (2 levels deep) completing must be
+    reported via its DIRECT parent (a_sub, whose own edge goes -> a_mid),
+    NOT via the flattened top-level ancestor n2 (whose edge goes -> n3) —
+    that would skip a_sub's real intermediate transition entirely. Ticks
+    carry real node ids throughout (no remapping), so the client can render
+    each nested level's own structure."""
     from app.session import Run, Session
 
     compiled = compile_flow(parse_flow(doubly_nested_subgraph_flow()))
@@ -277,9 +280,28 @@ async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
     run.credits._value = 10**6  # let every acquire_credit() through immediately
     await run.scheduler.run(compiled.graph, initial_payload={})
 
-    ticks_by_executed = {t["executed"]: t for t in sent if t["type"] == "tick"}
-    assert ticks_by_executed["b_end"]["next"] == "n2"  # canvas-scoped (flattened)
-    # the edge actually resolved is a_sub's own ("out" -> a_mid), not n2's
-    assert ticks_by_executed["a_mid"]  # a_mid really did run next
+    ticks = [t for t in sent if t["type"] == "tick"]
+    by_executed = {}
+    for t in ticks:
+        by_executed.setdefault(t["executed"], []).append(t)
+
+    # b_end's completion is reported as its DIRECT parent "a_sub" firing its
+    # own real edge (-> a_mid) — not as "n2" (which would incorrectly skip
+    # straight to n2's own edge, -> n3).
+    assert "a_sub" in by_executed
+    assert "b_end" not in by_executed  # b_end itself never resolves an edge
+    a_sub_tick = by_executed["a_sub"][0]
+    assert (a_sub_tick["port"], a_sub_tick["next"]) == ("out", "a_mid")
+    assert a_sub_tick["edgeId"]
+
+    # a_end (only 1 level deep) resolves via its direct parent "n2", whose
+    # real edge correctly goes -> n3.
+    n2_tick = by_executed["n2"][0]
+    assert (n2_tick["port"], n2_tick["next"]) == ("out", "n3")
+
+    # ordinary nested nodes carry their own true ids/edges throughout.
+    assert by_executed["a_start"][0]["next"] == "a_sub"
+    assert by_executed["b_start"][0]["next"] == "b_end"
+
     finished = [t for t in sent if t["type"] == "finished"][0]
     assert finished["reason"] == "end"
