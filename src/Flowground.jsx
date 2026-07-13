@@ -24,9 +24,14 @@ export default class Flowground extends React.Component {
       iff:   { label: 'If',    color: '#B0708F', glyph: '◆', desc: 'Choose a path' },
       loop:  { label: 'Loop',  color: '#B65C3F', glyph: '↺', desc: 'Repeat steps' },
       fn:    { label: 'Function', color: '#8E7CC3', glyph: 'ƒ', desc: 'Use a mini-machine' },
+      split: { label: 'Split', color: '#3B8EA5', glyph: '⑂', desc: 'Run two branches at once' },
+      merge: { label: 'Merge', color: '#5B7F3B', glyph: '⑃', desc: 'Wait for every branch, then continue' },
+      subgraph: { label: 'Subgraph', color: '#9A6B3F', glyph: '▣', desc: 'A whole mini-flow, packed into one block' },
       end:   { label: 'End',   color: '#8B8178', glyph: '■', desc: 'Finish the flow' }
     };
-    this.ORDER = ['start','ask','say','set','iff','loop','fn','end'];
+    this.ORDER = ['start','ask','say','set','iff','loop','fn','split','merge','subgraph','end'];
+    // block -> required LoopGraph kind (PROTOCOL.md block table).
+    this.KIND_OF = {iff:'SWITCH', loop:'SWITCH', end:'TERMINAL', merge:'AGGREGATE', subgraph:'SUBGRAPH'};
     this.SPEEDS = [{label:'0.5×',ms:1400},{label:'1×',ms:850},{label:'2×',ms:420}];
     this.ACHS = [
       {id:'tutorial', label:'Trained up',     desc:'Finished the tutorial'},
@@ -48,25 +53,37 @@ export default class Flowground extends React.Component {
     try { tutDone = localStorage.getItem('flowground.tut') === '1'; } catch (e) {}
 
     this.state = {
+      // Parallel run -> merge -> loop whose body is a subgraph node that is
+      // itself a loop: exercises LoopGraph 0.5's fan-out (split), quorum
+      // join (merge/AGGREGATE) and nested sub-workflow (subgraph) features.
       nodes: [
-        {id:'n1', type:'start', x:360, y:40,  data:{}},
-        {id:'n2', type:'ask',   x:360, y:150, data:{name:'name', value:'Ada'}},
-        {id:'n3', type:'say',   x:360, y:260, data:{text:'Hello, {name}!'}},
-        {id:'n4', type:'set',   x:360, y:370, data:{name:'lap', expr:'1'}},
-        {id:'n5', type:'loop',  x:360, y:480, data:{times:'3'}},
-        {id:'n6', type:'say',   x:120, y:610, data:{text:'Lap {lap}'}},
-        {id:'n7', type:'set',   x:120, y:720, data:{name:'lap', expr:'lap + 1'}},
-        {id:'n8', type:'end',   x:600, y:610, data:{}}
+        {id:'n1',  type:'start',    x:360, y:40,   data:{}},
+        {id:'n2',  type:'ask',      x:360, y:150,  data:{name:'name', value:'Ada'}},
+        {id:'n3',  type:'say',      x:360, y:260,  data:{text:'Hello, {name}! Splitting into two branches…'}},
+        {id:'n4',  type:'set',      x:360, y:370,  data:{name:'num', expr:'4'}},
+        {id:'n5',  type:'split',    x:360, y:480,  data:{}},
+        {id:'n6',  type:'say',      x:120, y:610,  data:{text:'Branch A: still {name}'}},
+        {id:'n7',  type:'fn',       x:600, y:610,  data:{fn:'square', arg:'num', result:'squared'}},
+        {id:'n8',  type:'merge',    x:360, y:740,  data:{}},
+        {id:'n9',  type:'say',      x:360, y:850,  data:{text:'Merged! squared = {squared}'}},
+        {id:'n10', type:'loop',     x:360, y:960,  data:{times:'2'}},
+        {id:'n11', type:'subgraph', x:360, y:1070, data:{graph: JSON.stringify(this.defaultInnerLoopGraph())}},
+        {id:'n12', type:'end',      x:650, y:960,  data:{}}
       ],
       edges: [
-        {id:'e1', from:{node:'n1',port:'out'},    to:'n2'},
-        {id:'e2', from:{node:'n2',port:'out'},    to:'n3'},
-        {id:'e3', from:{node:'n3',port:'out'},    to:'n4'},
-        {id:'e4', from:{node:'n4',port:'out'},    to:'n5'},
-        {id:'e5', from:{node:'n5',port:'repeat'}, to:'n6'},
-        {id:'e6', from:{node:'n6',port:'out'},    to:'n7'},
-        {id:'e7', from:{node:'n7',port:'out'},    to:'n5'},
-        {id:'e8', from:{node:'n5',port:'done'},   to:'n8'}
+        {id:'e1',  from:{node:'n1',port:'out'},     to:'n2'},
+        {id:'e2',  from:{node:'n2',port:'out'},     to:'n3'},
+        {id:'e3',  from:{node:'n3',port:'out'},     to:'n4'},
+        {id:'e4',  from:{node:'n4',port:'out'},     to:'n5'},
+        {id:'e5',  from:{node:'n5',port:'a'},       to:'n6'},
+        {id:'e6',  from:{node:'n5',port:'b'},       to:'n7'},
+        {id:'e7',  from:{node:'n6',port:'out'},     to:'n8'},
+        {id:'e8',  from:{node:'n7',port:'out'},     to:'n8'},
+        {id:'e9',  from:{node:'n8',port:'out'},     to:'n9'},
+        {id:'e10', from:{node:'n9',port:'out'},     to:'n10'},
+        {id:'e11', from:{node:'n10',port:'repeat'}, to:'n11'},
+        {id:'e12', from:{node:'n11',port:'out'},    to:'n10'},
+        {id:'e13', from:{node:'n10',port:'done'},   to:'n12'}
       ],
       selNode: null, selEdge: null, ghost: null, pend: null,
       running: false, paused: false, curId: null, activeEdge: null,
@@ -95,12 +112,38 @@ export default class Flowground extends React.Component {
     if (el && ps && ps.console.length !== this.state.console.length) el.scrollTop = el.scrollHeight;
   }
 
+  // A subgraph block has no nested-canvas editor — every subgraph node embeds
+  // this fixed mini-loop (PROTOCOL.md "subgraph": a nested flowground.v1 flow,
+  // JSON-encoded in config.graph). It's a real 2-round loop, compiled and run
+  // by LoopGraph exactly like the top-level flow.
+  defaultInnerLoopGraph() {
+    const kindOf = (t) => this.KIND_OF[t] || 'TASK';
+    const n = (id, block, config) => ({id, kind: kindOf(block), block, config: config || {}});
+    return {
+      format: 'flowground.v1',
+      entry: 'sg_start',
+      nodes: [
+        n('sg_start', 'start'),
+        n('sg_loop', 'loop', {mode:'count', times:'2'}),
+        n('sg_say', 'say', {text:'Inner round — hi from inside the subgraph!'}),
+        n('sg_end', 'end')
+      ],
+      edges: [
+        {source:'sg_start', port:'out',    target:'sg_loop'},
+        {source:'sg_loop',  port:'repeat', target:'sg_say'},
+        {source:'sg_say',   port:'out',    target:'sg_loop'},
+        {source:'sg_loop',  port:'done',   target:'sg_end'}
+      ]
+    };
+  }
+
   // ---------- helpers ----------
   acc() { return this.props.accent || '#E8684A'; }
   portsOf(type) {
-    if (type === 'iff')  return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
-    if (type === 'loop') return [{port:'repeat',label:'again',color:'#B65C3F'},{port:'done',label:'done',color:'#8B8178'}];
-    if (type === 'end')  return [];
+    if (type === 'iff')   return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
+    if (type === 'loop')  return [{port:'repeat',label:'again',color:'#B65C3F'},{port:'done',label:'done',color:'#8B8178'}];
+    if (type === 'split') return [{port:'a',label:'A',color:'#3B8EA5'},{port:'b',label:'B',color:'#2E6E80'}];
+    if (type === 'end')   return [];
     return [{port:'out',label:'',color:this.TYPES[type].color}];
   }
   outAnchor(n, port) {
@@ -121,7 +164,8 @@ export default class Flowground extends React.Component {
   // ---------- graph editing ----------
   addNode(type, x, y) {
     const d = {ask:{name:'age', value:'12'}, say:{text:'Hello, {name}!'}, set:{name:'count', expr:'1'},
-               iff:{cond:'count > 3'}, loop:{mode:'count', times:'3', cond:'count < 4'}, fn:{fn:'double', arg:'count', result:'count'}}[type] || {};
+               iff:{cond:'count > 3'}, loop:{mode:'count', times:'3', cond:'count < 4'}, fn:{fn:'double', arg:'count', result:'count'},
+               subgraph:{graph: JSON.stringify(this.defaultInnerLoopGraph())}}[type] || {};
     const id = 'n' + (this.nid++);
     const cnt = this.state.nodes.length;
     const nx = x != null ? x : 640 + ((cnt * 40) % 180);
@@ -355,8 +399,8 @@ export default class Flowground extends React.Component {
 
   // ---------- export ----------
   buildFlow() {
-    const st = this.state;
-    const kindOf = function(t){ return (t === 'iff' || t === 'loop') ? 'SWITCH' : (t === 'end' ? 'TERMINAL' : 'TASK'); };
+    const st = this.state, self = this;
+    const kindOf = function(t){ return self.KIND_OF[t] || 'TASK'; };
     const start = st.nodes.find(function(n){ return n.type === 'start'; });
     return {
       format: 'flowground.v1',
@@ -418,6 +462,18 @@ export default class Flowground extends React.Component {
         L.push('    # function: ' + d.result + ' = ' + d.fn + '(' + d.arg + ')');
         L.push('    payload[' + q(d.result) + '] = ' + expr);
         L.push('    return payload'); break; }
+      case 'split':
+        L.push('    # split (TASK): a non-SWITCH node activates ALL of its');
+        L.push('    # out-edges — both ' + q(out('a')) + ' and ' + q(out('b')) + ' run.');
+        L.push('    return payload'); break;
+      case 'merge':
+        L.push('    # merge (AGGREGATE): waits for every incoming edge, then');
+        L.push('    # fires once. payload here is the LIST of upstream results.');
+        L.push('    return payload'); break;
+      case 'subgraph':
+        L.push('    # subgraph (SUBGRAPH): LoopGraph runs its own child graph —');
+        L.push('    # this node has no handler; see its config["graph"].');
+        L.push('    raise NotImplementedError  # exported for reference only'); break;
       default:
         L.push('    # ' + this.TYPES[node.type].label.toLowerCase());
         L.push('    return payload');
@@ -426,7 +482,7 @@ export default class Flowground extends React.Component {
   }
   buildExportLG() {
     const st = this.state, self = this;
-    const kindOf = function(t){ return (t === 'iff' || t === 'loop') ? 'SWITCH' : (t === 'end' ? 'TERMINAL' : 'TASK'); };
+    const kindOf = function(t){ return self.KIND_OF[t] || 'TASK'; };
     const start = st.nodes.find(function(n){ return n.type === 'start'; });
     const registry = {};
     st.nodes.forEach(function(n){ registry[n.id] = self.pyFor(n, st.edges); });
@@ -543,6 +599,13 @@ export default class Flowground extends React.Component {
         case 'loop': return (d.mode === 'while') ? 'while ' + d.cond : d.times + '× around';
         case 'fn':   return d.result + ' = ' + d.fn + '(' + d.arg + ')';
         case 'start':return 'entry point';
+        case 'split':return 'run both branches';
+        case 'merge':return 'wait for both, then continue';
+        case 'subgraph': {
+          let times = '2';
+          try { times = (JSON.parse(d.graph).nodes.find(function(x){ return x.block === 'loop'; }) || {}).config.times || times; } catch (e) {}
+          return 'nested ' + times + '× loop';
+        }
         case 'end':  return 'all done';
         default: return '';
       }
@@ -615,6 +678,9 @@ export default class Flowground extends React.Component {
         case 'fn': inspFields = [selectField('fn', 'Mini-machine', ['double', 'square', 'shout']), field('arg', 'Give it'), field('result', 'Save result as')];
           inspHint = 'double ×2 · square x·x · shout MAKES IT LOUD'; break;
         case 'start': inspHint = 'Every flow begins here. There is nothing to set.'; break;
+        case 'split': inspHint = 'Both of its arrows fire at once — LoopGraph runs branch A and branch B, one after the other, before anything downstream of both can continue.'; break;
+        case 'merge': inspHint = 'Waits for every branch that arrows into it to finish, then continues once — wire both branches of a Split here to join them back up.'; break;
+        case 'subgraph': inspHint = 'A whole mini-flow packed into one block — this one contains its own 2× loop, run by LoopGraph as a real nested sub-workflow. Nested editing isn’t supported yet, so its inside is fixed.'; break;
         case 'end': inspHint = 'When the flow reaches this block, it stops.'; break;
       }
     }

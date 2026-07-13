@@ -11,10 +11,17 @@ Contract between the React SPA and the Python backend. Both sides implement this
   it with LoopGraph's `Scheduler`. Streams per-node events over WebSocket.
 
 **Fidelity requirement (why this backend exists):** the user wants to *visually observe
-LoopGraph's real execution order*. All run events sent to the client MUST be derived from
-LoopGraph's `EventBus` events (`NODE_SCHEDULED/STARTED/COMPLETED/FAILED`) emitted by the actual
-`Scheduler` run — never from an independent graph walk that predicts what the scheduler
-"should" do. If the engine does something surprising, the UI must show it.
+LoopGraph's real execution order*. Every `tick` is sent only once the real `Scheduler` has
+actually dispatched and completed that node's handler (gated by the session's credit
+semaphore, never predicted ahead of it) — never from an independent graph walk. If the
+engine does something surprising (an unexpected route, a rejected graph shape), the UI must
+show it. `next`/`edgeId` are resolved from the compiled flow's static edge map, which is
+exactly as faithful as watching `NODE_SCHEDULED`: LoopGraph guarantees deterministic,
+graph-definition-order dispatch for simultaneously-ready nodes, and a (node, port) pair maps
+to exactly one edge by construction — the earlier design that paired each report with the
+*following* `NODE_SCHEDULED` event was retired because that 1:1 pairing silently mispairs or
+drops reports across a genuine merge (two branches both completing before their shared
+`AGGREGATE` target is scheduled once — see "Fan-out and merge ticks" below).
 
 ## Wire format: `flowground.v1`
 
@@ -35,7 +42,8 @@ it is NEVER sent to the server (client-supplied code = RCE).
 }
 ```
 
-- `kind`: `TASK` (start/ask/say/set/fn), `SWITCH` (iff/loop), `TERMINAL` (end).
+- `kind`: `TASK` (start/ask/say/set/fn/split), `SWITCH` (iff/loop), `TERMINAL` (end),
+  `AGGREGATE` (merge), `SUBGRAPH` (subgraph).
   Server re-derives and validates kind from `block`; mismatch → validation error.
 - `position` is editor-only; server ignores it.
 - Block configs (all values are strings, straight from the inspector):
@@ -48,7 +56,37 @@ it is NEVER sent to the server (client-supplied code = RCE).
   | iff   | `{cond}` | `true`, `false` |
   | loop  | `{mode: "count"\|"while", times?, cond?}` | `repeat`, `done` |
   | fn    | `{fn: "double"\|"square"\|"shout", arg, result}` | `out` |
+  | split | `{}` | `a`, `b` (both fire — a real LoopGraph fan-out) |
+  | merge | `{}` | `out` (fires once all incoming branches complete) |
+  | subgraph | `{graph: "<JSON-encoded nested flowground.v1 flow>"}` | `out` |
   | end   | `{}` | none |
+
+### Fan-out and merge ticks
+
+- **split** is a `TASK`-kind node with two out-ports, both of which LoopGraph activates
+  unconditionally (only `SWITCH` kinds route — everything else fires all out-edges). One
+  `split` completion therefore produces **two** `tick` messages, one per activated edge, both
+  sharing the same `step`. Only the first carries `logs`; the second's `logs` is `[]` so the
+  console never narrates one completion twice. Clients apply every tick as its own atomic
+  update (highlight `next`, animate the edge for `port`) — nothing in the protocol assumes one
+  tick per node completion any more.
+- **merge** is an `AGGREGATE`-kind node: unlike an ordinary join (which fires on the *first*
+  upstream and ignores the rest), it waits for every incoming edge before its handler runs
+  once. Both branches that fed it get their own ordinary tick showing `next` = the merge
+  node's id — nothing is dropped, nothing is double-counted.
+- **subgraph** embeds a complete nested flow. Server-side, its inner nodes compile and run
+  exactly like top-level ones (same block vocabulary, same shared variables/console), but the
+  canvas has no boxes for them: every inner tick's `next` is remapped to the enclosing
+  subgraph block's own id, so that block stays highlighted for the whole child-graph run while
+  the console narrates its real steps (e.g. real `Loop — round 1 of 2` lines from the inner
+  loop). The one tick where control returns to the parent (the child's own `end`/`TERMINAL`
+  completing) reports `next` as the parent's real downstream node — but `executed` stays the
+  literal inner node id, so — as a deliberate, documented simplification — that specific
+  transition's edge does not animate (no local canvas edge originates from an inner node's
+  id). A nested `end` block ends only that child graph (LoopGraph's own subgraph contract);
+  only the outermost flow's `end` halts the whole run.
+- Node/edge ids must be globally unique across a flow and every subgraph nested inside it,
+  at any depth — the server rejects a collision with a friendly error.
 
 ## HTTP endpoints
 
@@ -112,8 +150,10 @@ Server cancels the active run when the socket closes.
   need not match, so clients must resolve the edge to animate from `(executed, port)`,
   not from `edgeId`). `vars` is the full payload snapshot (raw JSON values; non-finite
   numbers, which JSON cannot carry, are encoded as `{"__js": "NaN"|"Infinity"|"-Infinity"}`
-  and rendered bare by clients). One `tick` = one atomic UI update. `tick` and
-  `finished` carry the run's `runId`.
+  and rendered bare by clients). One `tick` = one atomic UI update, but one node completion
+  is not always one tick: a `split` produces one tick per activated edge (see "Fan-out and
+  merge ticks" above), and `next`/`executed` for a subgraph's inner nodes are scoped to the
+  enclosing subgraph block. `tick` and `finished` carry the run's `runId`.
 - `finished` is a final tick: `reason` = `"end"` (reached End block) | `"error"` (flow
   error, see wording below) | `"step_limit"` (150 steps). Its `logs` carry the closing
   line(s). UI clears highlight/edge, `running=false`.
@@ -140,6 +180,8 @@ contain typographic characters (U+2019 ’, U+2014 —, U+2192 →); do not rety
 | loop(count) done | loop | `Loop finished — moving on` |
 | loop(while) | loop | `While {cond}?  → yes — around again` / `…→ no — loop done` |
 | fn | step | `{result} = {fn}({fmt(a)}) → {fmt(r)}` |
+| split | step | `Split — running both branches` |
+| merge | step | `Merge — branches joined` |
 | end | ok | `Flow finished — nice!` |
 | eval failure | err | `Stuck on the {Label} block: can’t work out "{expr}" — is every variable set first?` |
 | empty expr | err | `Stuck on the {Label} block: this field is empty` |
@@ -148,7 +190,7 @@ contain typographic characters (U+2019 ’, U+2014 —, U+2192 →); do not rety
 | unconnected port | err | `The "{port}" arrow of this {Label} block isn’t connected — drag from its dot to the next block.` |
 | step 150 hit | warn | `150 steps and still going — this might be an infinite loop!` |
 
-`{Label}` = block label (`Start/Ask/Say/Set variable/If/Loop/Function/End`).
+`{Label}` = block label (`Start/Ask/Say/Set variable/If/Loop/Function/Split/Merge/Subgraph/End`).
 
 ### Value semantics
 
