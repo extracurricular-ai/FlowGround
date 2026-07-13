@@ -67,7 +67,7 @@ export default class Flowground extends React.Component {
         {id:'n8',  type:'merge',    x:360, y:740,  data:{}},
         {id:'n9',  type:'say',      x:360, y:850,  data:{text:'Merged! squared = {squared}'}},
         {id:'n10', type:'loop',     x:360, y:960,  data:{times:'2'}},
-        {id:'n11', type:'subgraph', x:360, y:1070, data:{graph: JSON.stringify(this.defaultInnerLoopGraph())}},
+        {id:'n11', type:'subgraph', x:360, y:1070, data:{graph: JSON.stringify(this.defaultInnerLoopGraph('n11'))}},
         {id:'n12', type:'end',      x:650, y:960,  data:{}}
       ],
       edges: [
@@ -116,23 +116,27 @@ export default class Flowground extends React.Component {
   // this fixed mini-loop (PROTOCOL.md "subgraph": a nested flowground.v1 flow,
   // JSON-encoded in config.graph). It's a real 2-round loop, compiled and run
   // by LoopGraph exactly like the top-level flow.
-  defaultInnerLoopGraph() {
+  // `prefix` MUST be unique per subgraph node instance — the backend requires
+  // globally-unique ids across a flow and every nested body, at any depth, so
+  // two subgraph blocks sharing the same inner ids fail to compile.
+  defaultInnerLoopGraph(prefix) {
+    const p = prefix + '_';
     const kindOf = (t) => this.KIND_OF[t] || 'TASK';
-    const n = (id, block, config) => ({id, kind: kindOf(block), block, config: config || {}});
+    const n = (id, block, config) => ({id: p + id, kind: kindOf(block), block, config: config || {}});
     return {
       format: 'flowground.v1',
-      entry: 'sg_start',
+      entry: p + 'start',
       nodes: [
-        n('sg_start', 'start'),
-        n('sg_loop', 'loop', {mode:'count', times:'2'}),
-        n('sg_say', 'say', {text:'Inner round — hi from inside the subgraph!'}),
-        n('sg_end', 'end')
+        n('start', 'start'),
+        n('loop', 'loop', {mode:'count', times:'2'}),
+        n('say', 'say', {text:'Inner round — hi from inside the subgraph!'}),
+        n('end', 'end')
       ],
       edges: [
-        {source:'sg_start', port:'out',    target:'sg_loop'},
-        {source:'sg_loop',  port:'repeat', target:'sg_say'},
-        {source:'sg_say',   port:'out',    target:'sg_loop'},
-        {source:'sg_loop',  port:'done',   target:'sg_end'}
+        {source:p+'start', port:'out',    target:p+'loop'},
+        {source:p+'loop',  port:'repeat', target:p+'say'},
+        {source:p+'say',   port:'out',    target:p+'loop'},
+        {source:p+'loop',  port:'done',   target:p+'end'}
       ]
     };
   }
@@ -163,10 +167,13 @@ export default class Flowground extends React.Component {
 
   // ---------- graph editing ----------
   addNode(type, x, y) {
+    const id = 'n' + (this.nid++);
+    // subgraph's inner ids are prefixed with this node's own id — every
+    // subgraph instance needs globally-unique inner ids, or two of them on
+    // one canvas collide (PROTOCOL.md: ids unique across all nesting).
     const d = {ask:{name:'age', value:'12'}, say:{text:'Hello, {name}!'}, set:{name:'count', expr:'1'},
                iff:{cond:'count > 3'}, loop:{mode:'count', times:'3', cond:'count < 4'}, fn:{fn:'double', arg:'count', result:'count'},
-               subgraph:{graph: JSON.stringify(this.defaultInnerLoopGraph())}}[type] || {};
-    const id = 'n' + (this.nid++);
+               subgraph:{graph: JSON.stringify(this.defaultInnerLoopGraph(id))}}[type] || {};
     const cnt = this.state.nodes.length;
     const nx = x != null ? x : 640 + ((cnt * 40) % 180);
     const ny = y != null ? y : 120 + ((cnt * 70) % 420);

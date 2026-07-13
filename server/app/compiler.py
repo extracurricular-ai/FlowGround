@@ -74,10 +74,18 @@ class CompiledFlow:
     #: halts the whole run. A nested subgraph's "end" block just ends that
     #: child graph; LoopGraph does that automatically when its TERMINAL runs.
     top_level_ids: Set[str] = field(default_factory=set)
-    #: node id → nearest enclosing top-level SUBGRAPH node id (identity for
-    #: top-level ids themselves). Lets the WS session keep a subgraph block
-    #: highlighted on canvas for the duration of its child graph's run.
+    #: node id → OUTERMOST enclosing top-level SUBGRAPH node id (identity for
+    #: top-level ids themselves) — flattened across every nesting level. Lets
+    #: the WS session keep a subgraph block highlighted on canvas for the
+    #: duration of its child graph's run, no matter how deep inside it a
+    #: given node actually is.
     node_scope: Dict[str, str] = field(default_factory=dict)
+    #: node id → its DIRECT (one level up) enclosing SUBGRAPH node id, absent
+    #: for top-level ids. Unlike ``node_scope`` this is NOT flattened — used
+    #: to resolve "what fires next" when a nested child graph's own TERMINAL
+    #: completes, which is always the immediate parent's out-edge, not the
+    #: outermost ancestor's (those differ once subgraphs nest 2+ levels deep).
+    parent_scope: Dict[str, str] = field(default_factory=dict)
 
 
 class BlockError(Exception):
@@ -105,7 +113,8 @@ def _compile_subgraph_body(n: FlowNode, enclosing: Optional[str], *,
                            all_flow_nodes: Dict[str, FlowNode],
                            edge_map: Dict[Tuple[str, str], Tuple[str, str]],
                            top_level_ids: Set[str],
-                           node_scope: Dict[str, str]) -> LGGraph:
+                           node_scope: Dict[str, str],
+                           parent_scope: Dict[str, str]) -> LGGraph:
     """Parse+compile a "subgraph" block's nested ``flowground.v1`` body."""
     label = BLOCKS[n.block].label
     raw = n.config.get("graph", "")
@@ -123,21 +132,28 @@ def _compile_subgraph_body(n: FlowNode, enclosing: Optional[str], *,
              for m in exc.errors]) from exc
     outer_scope = n.id if enclosing is None else enclosing
     return _compile_scope(child_flow.nodes, child_flow.edges, enclosing=outer_scope,
-                          all_flow_nodes=all_flow_nodes, edge_map=edge_map,
-                          top_level_ids=top_level_ids, node_scope=node_scope)
+                          parent=n.id, all_flow_nodes=all_flow_nodes,
+                          edge_map=edge_map, top_level_ids=top_level_ids,
+                          node_scope=node_scope, parent_scope=parent_scope)
 
 
 def _compile_scope(flow_nodes: List[FlowNode], flow_edges: List[FlowEdge], *,
-                   enclosing: Optional[str],
+                   enclosing: Optional[str], parent: Optional[str],
                    all_flow_nodes: Dict[str, FlowNode],
                    edge_map: Dict[Tuple[str, str], Tuple[str, str]],
                    top_level_ids: Set[str],
-                   node_scope: Dict[str, str]) -> LGGraph:
+                   node_scope: Dict[str, str],
+                   parent_scope: Dict[str, str]) -> LGGraph:
     """Compile one flow's worth of nodes/edges into an ``LGGraph``, recursing
     into any "subgraph" blocks. All node/edge ids across every scope share
-    one flat ``all_flow_nodes``/``edge_map`` (ids must be globally unique)."""
+    one flat ``all_flow_nodes``/``edge_map`` (ids must be globally unique).
+    ``enclosing`` is the OUTERMOST top-level ancestor (for ``node_scope``);
+    ``parent`` is the DIRECT enclosing subgraph node, one level up, or None
+    at the top level (for ``parent_scope``) — they diverge once subgraphs
+    nest two or more levels deep."""
     nodes: Dict[str, LGNode] = {}
     local_nodes: Dict[str, FlowNode] = {}
+    subgraph_ids: List[str] = []
     for n in flow_nodes:
         if n.id in all_flow_nodes:
             raise FlowValidationError(
@@ -153,12 +169,16 @@ def _compile_scope(flow_nodes: List[FlowNode], flow_edges: List[FlowEdge], *,
             node_scope[n.id] = n.id
         else:
             node_scope[n.id] = enclosing
+        if parent is not None:
+            parent_scope[n.id] = parent
 
         spec = BLOCKS[n.block]
         if n.block in NESTED_GRAPH_BLOCKS:
+            subgraph_ids.append(n.id)
             child_graph = _compile_subgraph_body(
                 n, enclosing, all_flow_nodes=all_flow_nodes, edge_map=edge_map,
-                top_level_ids=top_level_ids, node_scope=node_scope)
+                top_level_ids=top_level_ids, node_scope=node_scope,
+                parent_scope=parent_scope)
             lg_config: Dict[str, object] = {"graph": child_graph.to_dict()}
             handler = ""
         else:
@@ -185,6 +205,20 @@ def _compile_scope(flow_nodes: List[FlowNode], flow_edges: List[FlowEdge], *,
                                 metadata=metadata)
         edge_map[(e.source, e.port)] = (e.id, e.target)
 
+    # A subgraph node has no handler of its own, so — unlike every other
+    # block — nothing at RUNTIME ever checks that its single "out" port is
+    # wired (PROTOCOL.md's "unconnected port" narration never fires for it).
+    # Its out-edge always fires unconditionally once the child graph ends, so
+    # catching a missing one here (compile time) loses no legitimate
+    # "never actually reached" case the way skipping an iff/loop branch would.
+    for sid in subgraph_ids:
+        label = BLOCKS[local_nodes[sid].block].label
+        for port in local_nodes[sid].ports:
+            if (sid, port) not in edge_map:
+                raise FlowValidationError(
+                    [f'The "{port}" arrow of this {label} block ({sid}) isn’t '
+                     "connected — drag from its dot to the next block."])
+
     return LGGraph(nodes=nodes, edges=lg_edges)
 
 
@@ -195,10 +229,12 @@ def compile_flow(flow: Flow) -> CompiledFlow:
     edge_map: Dict[Tuple[str, str], Tuple[str, str]] = {}
     top_level_ids: Set[str] = set()
     node_scope: Dict[str, str] = {}
+    parent_scope: Dict[str, str] = {}
 
-    graph = _compile_scope(flow.nodes, flow.edges, enclosing=None,
+    graph = _compile_scope(flow.nodes, flow.edges, enclosing=None, parent=None,
                            all_flow_nodes=all_flow_nodes, edge_map=edge_map,
-                           top_level_ids=top_level_ids, node_scope=node_scope)
+                           top_level_ids=top_level_ids, node_scope=node_scope,
+                           parent_scope=parent_scope)
 
     try:
         graph.validate()
@@ -209,7 +245,7 @@ def compile_flow(flow: Flow) -> CompiledFlow:
 
     return CompiledFlow(flow=flow, graph=graph, edge_map=edge_map,
                         nodes=all_flow_nodes, top_level_ids=top_level_ids,
-                        node_scope=node_scope)
+                        node_scope=node_scope, parent_scope=parent_scope)
 
 
 # ---------- block semantics (prototype tick() parity) ----------

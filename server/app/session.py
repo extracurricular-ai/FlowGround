@@ -190,12 +190,16 @@ class Run:
         # its own. LoopGraph completes the enclosing SUBGRAPH node with the
         # child's payload and fires ITS downstream edge instead — surface
         # that edge here so the tick still shows where control goes next.
-        enclosing = self.compiled.node_scope.get(node_id)
-        if enclosing is not None and enclosing != node_id:
-            enclosing_node = self.compiled.nodes.get(enclosing)
-            if enclosing_node is not None:
-                for port in enclosing_node.ports:
-                    edge = self.compiled.edge_map.get((enclosing, port))
+        # This must be the DIRECT parent (parent_scope), not the outermost
+        # top-level ancestor (node_scope) — those differ once subgraphs nest
+        # two or more levels deep, and using the wrong one would skip the
+        # intermediate subgraph's own transition entirely.
+        parent = self.compiled.parent_scope.get(node_id)
+        if parent is not None:
+            parent_node = self.compiled.nodes.get(parent)
+            if parent_node is not None:
+                for port in parent_node.ports:
+                    edge = self.compiled.edge_map.get((parent, port))
                     if edge is not None:
                         return [(port, edge[0], edge[1])]
         return []

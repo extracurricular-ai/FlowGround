@@ -292,6 +292,48 @@ def split_merge_loop_subgraph_flow():
     ])
 
 
+def doubly_nested_subgraph_flow():
+    """A subgraph node (n2) whose body itself contains a subgraph node
+    (a_sub) — exercises parent_scope vs. the flattened node_scope, which
+    diverge once nesting is 2+ levels deep."""
+    inner_b = flow("b_start", [
+        node("b_start", "start"),
+        node("b_end", "end"),
+    ], [
+        edge("be1", "b_start", "out", "b_end"),
+    ])
+    inner_a = flow("a_start", [
+        node("a_start", "start"),
+        node("a_sub", "subgraph", {"graph": json.dumps(inner_b)}),
+        node("a_mid", "say", {"text": "back in A"}),
+        node("a_end", "end"),
+    ], [
+        edge("ae1", "a_start", "out", "a_sub"),
+        edge("ae2", "a_sub", "out", "a_mid"),
+        edge("ae3", "a_mid", "out", "a_end"),
+    ])
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "subgraph", {"graph": json.dumps(inner_a)}),
+        node("n3", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "out", "n3"),
+    ])
+
+
+def unconnected_subgraph_flow():
+    """A subgraph block whose "out" port has no edge — must be rejected at
+    compile time, since a subgraph node never gets a runtime handler to
+    catch this the way every other block does."""
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "subgraph", {"graph": json.dumps(inner_loop_subflow())}),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+    ])
+
+
 def duplicate_id_subgraph_flow():
     """A subgraph block reuses a top-level node id — must be rejected."""
     inner = flow("n2", [

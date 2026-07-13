@@ -10,10 +10,10 @@ from app.compiler import (_fn_double, _fn_square, _loop_times, build_registry,
                           compile_flow)
 from app.schema import FlowValidationError, parse_flow
 
-from flowdefs import (duplicate_id_subgraph_flow, edge, flow, node,
-                      self_loop_flow, shared_loops_flow, split_merge_flow,
-                      split_merge_loop_subgraph_flow, starter_flow,
-                      subgraph_flow)
+from flowdefs import (doubly_nested_subgraph_flow, duplicate_id_subgraph_flow,
+                      edge, flow, node, self_loop_flow, shared_loops_flow,
+                      split_merge_flow, split_merge_loop_subgraph_flow,
+                      starter_flow, subgraph_flow, unconnected_subgraph_flow)
 
 STARTER_ORDER = ["n1", "n2", "n3", "n4", "n5", "n6", "n7",
                  "n5", "n6", "n7", "n5", "n6", "n7", "n5", "n8"]
@@ -235,3 +235,51 @@ def test_duplicate_id_across_scopes_is_rejected():
     with pytest.raises(FlowValidationError) as exc:
         compile_flow(parse_flow(duplicate_id_subgraph_flow()))
     assert any('share the id "n2"' in e for e in exc.value.errors)
+
+
+def test_unconnected_subgraph_out_port_rejected_at_compile_time():
+    # A subgraph node has no handler of its own, so nothing at runtime ever
+    # checks its "out" port the way _make_handler does for every other
+    # block — this must be caught at compile time instead.
+    with pytest.raises(FlowValidationError) as exc:
+        compile_flow(parse_flow(unconnected_subgraph_flow()))
+    assert any('"out" arrow of this Subgraph block (n2) isn' in e
+              for e in exc.value.errors)
+
+
+def test_doubly_nested_subgraph_scopes_are_correct():
+    compiled = compile_flow(parse_flow(doubly_nested_subgraph_flow()))
+    # node_scope flattens all the way to the top-level ancestor...
+    assert compiled.node_scope["b_end"] == "n2"
+    assert compiled.node_scope["a_mid"] == "n2"
+    # ...but parent_scope stays ONE level up, which is what matters for
+    # resolving "what fires next" when a's own body's b_end completes.
+    assert compiled.parent_scope["b_end"] == "a_sub"
+    assert compiled.parent_scope["a_mid"] == "n2"
+    assert compiled.parent_scope["a_start"] == "n2"
+    assert "n1" not in compiled.parent_scope  # top-level ids have no parent
+
+
+async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
+    """The regression this guards: b_end (2 levels deep) completing must
+    resolve to a_sub's own out-edge (-> a_mid), NOT skip straight to n2's
+    out-edge (-> n3) just because node_scope flattens both to n2."""
+    from app.session import Run, Session
+
+    compiled = compile_flow(parse_flow(doubly_nested_subgraph_flow()))
+    sent = []
+
+    class StubSession:
+        def send(self, message):
+            sent.append(message)
+
+    run = Run(StubSession(), compiled, "run", speed=2, run_id="r1")
+    run.credits._value = 10**6  # let every acquire_credit() through immediately
+    await run.scheduler.run(compiled.graph, initial_payload={})
+
+    ticks_by_executed = {t["executed"]: t for t in sent if t["type"] == "tick"}
+    assert ticks_by_executed["b_end"]["next"] == "n2"  # canvas-scoped (flattened)
+    # the edge actually resolved is a_sub's own ("out" -> a_mid), not n2's
+    assert ticks_by_executed["a_mid"]  # a_mid really did run next
+    finished = [t for t in sent if t["type"] == "finished"][0]
+    assert finished["reason"] == "end"

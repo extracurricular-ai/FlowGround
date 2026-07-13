@@ -126,7 +126,7 @@ def parse_flow(data: Any) -> Flow:
         block = raw.get("block")
         if block not in BLOCKS:
             errors.append(f'Unknown block type "{block}" on node {nid} — expected '
-                          'one of start, ask, say, set, iff, loop, fn, end.')
+                          'one of ' + ", ".join(BLOCKS) + ".")
             continue
         spec = BLOCKS[block]
         kind = raw.get("kind")
