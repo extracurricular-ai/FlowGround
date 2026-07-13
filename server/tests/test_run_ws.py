@@ -522,6 +522,14 @@ def test_split_merge_loop_subgraph_over_websocket():
     assert len(exit_ticks) == 2  # once per outer loop visit
     assert all(e["port"] == "out" and e["next"] == "n7" and e["edgeId"]
               for e in exit_ticks)
+    # `completed` is the literal inner terminal — a client MUST clear the
+    # edge leading into it using this field, not `executed` (which is
+    # overridden to "n8" above): no other tick ever names "sg_end" as
+    # `executed`, so an edge keyed off that would animate forever otherwise.
+    assert all(e["completed"] == "sg_end" for e in exit_ticks)
+    # every ordinary tick's `completed` matches `executed` (no override)
+    ordinary = [e for e in events if e["type"] == "tick" and e["executed"] != "n8"]
+    assert all(e["completed"] == e["executed"] for e in ordinary)
     # the run really executed the inner loop twice per subgraph visit
     say_texts = [l["text"] for e in events for l in e["logs"]
                 if l["text"] == "inner round"]

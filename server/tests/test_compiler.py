@@ -293,11 +293,16 @@ async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
     a_sub_tick = by_executed["a_sub"][0]
     assert (a_sub_tick["port"], a_sub_tick["next"]) == ("out", "a_mid")
     assert a_sub_tick["edgeId"]
+    # `completed` must still be the literal "b_end" — a client clears the
+    # edge INTO b_end using this, not `executed` ("a_sub"); otherwise that
+    # edge can never be recognized as reached and animates forever.
+    assert a_sub_tick["completed"] == "b_end"
 
     # a_end (only 1 level deep) resolves via its direct parent "n2", whose
     # real edge correctly goes -> n3.
     n2_tick = by_executed["n2"][0]
     assert (n2_tick["port"], n2_tick["next"]) == ("out", "n3")
+    assert n2_tick["completed"] == "a_end"
 
     # ordinary nested nodes carry their own true ids/edges throughout.
     assert by_executed["a_start"][0]["next"] == "a_sub"

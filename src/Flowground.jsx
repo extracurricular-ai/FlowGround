@@ -451,8 +451,13 @@ export default class Flowground extends React.Component {
       // (source>port) covers top-level AND a subgraph's own inner edges
       // uniformly; clients resolve which drawn edge a key belongs to at
       // render time (buildEdgesSvg / the subgraph's mini-edges), not here.
+      // Consume by `completed`, NOT `executed`: a subgraph's exit tick
+      // reports `executed` as the ENCLOSING subgraph node (so its own edge
+      // can animate), but `completed` is the literal inner terminal that
+      // just finished — the edge leading into IT is what must be cleared,
+      // or it never turns off (no other tick ever names that terminal).
       this.setState(function(s){
-        const activeEdges = self.consumeEdgesInto(s.activeEdges, msg.executed);
+        const activeEdges = self.consumeEdgesInto(s.activeEdges, msg.completed);
         if (msg.port != null) activeEdges[msg.executed + '>' + msg.port] = msg.next;
         return {
           console: s.console.concat(msg.logs || []).slice(-200),

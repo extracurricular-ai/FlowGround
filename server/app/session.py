@@ -162,6 +162,16 @@ class Run:
                 "type": "tick",
                 "runId": self.run_id,
                 "executed": executed,
+                # the node whose HANDLER actually just finished — usually
+                # identical to `executed`, but differs for a nested subgraph's
+                # own exit transition (`executed` is overridden to the
+                # enclosing SUBGRAPH node so its edge can animate). Clients
+                # must clear a previously-active edge once ITS target is
+                # reached, using `completed`, not `executed` — otherwise the
+                # edge leading into a subgraph's inner TERMINAL, whose own
+                # completion never appears as `executed` on any tick, can
+                # never be recognized as reached and never turns off.
+                "completed": report.node_id,
                 "port": port,
                 "next": target,
                 "edgeId": edge_id,

@@ -86,18 +86,23 @@ it is NEVER sent to the server (client-supplied code = RCE).
   since LoopGraph's own contract is that "a sub-workflow is just another task" from the
   parent's perspective (the terminal's payload becomes the *subgraph node's* result, and the
   subgraph node's own out-edge is what genuinely fires next); it also happens to be the only
-  framing whose edge a client can resolve to a real, drawn edge and animate. A nested `end`
-  block ends only that child graph (LoopGraph's own subgraph contract); only the outermost
-  flow's `end` halts the whole run.
+  framing whose edge a client can resolve to a real, drawn edge and animate. That same tick's
+  `completed` still names the literal inner terminal id — clients need it to clear the edge
+  that led into that terminal (whose target is the terminal's own id, never `executed`'s
+  overridden value); skipping this leaves that one edge animating forever, since no other
+  tick ever reports the terminal as `executed`. A nested `end` block ends only that child
+  graph (LoopGraph's own subgraph contract); only the outermost flow's `end` halts the whole
+  run.
 - Node/edge ids must be globally unique across a flow and every subgraph nested inside it,
   at any depth — the server rejects a collision with a friendly error.
 - A `split` (or any node with multiple simultaneously-activated out-edges) sends its several
   ticks back-to-back, all sharing one `step`. Clients must treat "active edges/nodes" as
   accumulating, not single-valued: an edge becomes active when its tick names it and stays
-  active until a *later* tick's `executed` matches that edge's own target (i.e. until
-  execution actually reaches the far end) — never cleared just because a different edge fired
-  in between. This is what makes a fan-out show both branches lit at once, and a merge show
-  both incoming edges lit together right up until the merge itself runs.
+  active until a *later* tick's `completed` (not `executed` — see the subgraph exit case
+  above) matches that edge's own target (i.e. until execution actually reaches the far end)
+  — never cleared just because a different edge fired in between. This is what makes a
+  fan-out show both branches lit at once, and a merge show both incoming edges lit together
+  right up until the merge itself runs.
 
 ## HTTP endpoints
 
@@ -144,8 +149,8 @@ Server cancels the active run when the socket closes.
 {"type": "started", "runId": "r3", "entry": "n1", "mode": "run",
  "logs": [{"kind": "info", "text": "Run started"}]}
 
-{"type": "tick", "executed": "n5", "port": "repeat", "next": "n6", "edgeId": "e5",
- "step": 3, "logs": [{"kind": "loop", "text": "Loop — round 1 of 3"}],
+{"type": "tick", "executed": "n5", "completed": "n5", "port": "repeat", "next": "n6",
+ "edgeId": "e5", "step": 3, "logs": [{"kind": "loop", "text": "Loop — round 1 of 3"}],
  "vars": {"name": "Ada", "lap": 1}}
 
 {"type": "finished", "reason": "end", "executed": "n8", "port": null, "step": 9,
@@ -159,7 +164,11 @@ Server cancels the active run when the socket closes.
 - `tick`: node `executed` ran; `next` is now highlighted; `edgeId` names the traversed
   edge **positionally** (`e{index+1}` over the wire-format edge array — local editor ids
   need not match, so clients must resolve the edge to animate from `(executed, port)`,
-  not from `edgeId`). `vars` is the full payload snapshot (raw JSON values; non-finite
+  not from `edgeId`). `completed` is the node whose handler actually just finished —
+  identical to `executed` except for a subgraph's own exit transition (see "Fan-out and
+  merge ticks"); clients must clear a previously-active edge once ITS target equals
+  `completed`, not `executed`, or an edge into a subgraph's inner terminal can never be
+  recognized as reached. `vars` is the full payload snapshot (raw JSON values; non-finite
   numbers, which JSON cannot carry, are encoded as `{"__js": "NaN"|"Infinity"|"-Infinity"}`
   and rendered bare by clients). One `tick` = one atomic UI update, but one node completion
   is not always one tick: a `split` produces one tick per activated edge (see "Fan-out and
