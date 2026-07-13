@@ -66,9 +66,15 @@ export default class Flowground extends React.Component {
         {id:'n7',  type:'fn',       x:600, y:610,  data:{fn:'square', arg:'num', result:'squared'}},
         {id:'n8',  type:'merge',    x:360, y:740,  data:{}},
         {id:'n9',  type:'say',      x:360, y:850,  data:{text:'Merged! squared = {squared}'}},
-        {id:'n10', type:'loop',     x:360, y:960,  data:{times:'2'}},
-        {id:'n11', type:'subgraph', x:360, y:1070, data:{graph: JSON.stringify(this.defaultInnerLoopGraph('n11'))}},
-        {id:'n12', type:'end',      x:650, y:960,  data:{}}
+        // "iff" (SWITCH) vs. "split" (TASK): split fires BOTH out-edges
+        // unconditionally, iff picks exactly ONE by evaluating a condition
+        // — LoopGraph routing a real decision, not a fan-out.
+        {id:'n13', type:'iff',      x:360, y:960,  data:{cond:'squared > 10'}},
+        {id:'n14', type:'say',      x:120, y:1090, data:{text:"That's a big number!"}},
+        {id:'n15', type:'say',      x:600, y:1090, data:{text:"That's a small number."}},
+        {id:'n10', type:'loop',     x:360, y:1200, data:{times:'2'}},
+        {id:'n11', type:'subgraph', x:360, y:1310, data:{graph: JSON.stringify(this.defaultInnerLoopGraph('n11'))}},
+        {id:'n12', type:'end',      x:650, y:1200, data:{}}
       ],
       edges: [
         {id:'e1',  from:{node:'n1',port:'out'},     to:'n2'},
@@ -80,13 +86,17 @@ export default class Flowground extends React.Component {
         {id:'e7',  from:{node:'n6',port:'out'},     to:'n8'},
         {id:'e8',  from:{node:'n7',port:'out'},     to:'n8'},
         {id:'e9',  from:{node:'n8',port:'out'},     to:'n9'},
-        {id:'e10', from:{node:'n9',port:'out'},     to:'n10'},
+        {id:'e10', from:{node:'n9',port:'out'},     to:'n13'},
+        {id:'e14', from:{node:'n13',port:'true'},   to:'n14'},
+        {id:'e15', from:{node:'n13',port:'false'},  to:'n15'},
+        {id:'e16', from:{node:'n14',port:'out'},    to:'n10'},
+        {id:'e17', from:{node:'n15',port:'out'},    to:'n10'},
         {id:'e11', from:{node:'n10',port:'repeat'}, to:'n11'},
         {id:'e12', from:{node:'n11',port:'out'},    to:'n10'},
         {id:'e13', from:{node:'n10',port:'done'},   to:'n12'}
       ],
       selNode: null, selEdge: null, ghost: null, pend: null,
-      running: false, paused: false, curId: null, activeEdge: null,
+      running: false, paused: false, curId: null, activeEdges: {},
       vars: {}, steps: 0, console: [],
       speedIx: 1, ach: ach, toast: null, tut: tutDone ? -1 : 0, exportOn: false, exportFmt: 'lg', copied: false
     };
@@ -281,7 +291,7 @@ export default class Flowground extends React.Component {
     if (pr.kind === 'node' && pr.moved) {
       const r = this.canvasRef.current.getBoundingClientRect();
       const x = Math.max(8, Math.min(1404, e.clientX - r.left - pr.dx));
-      const y = Math.max(8, Math.min(1330, e.clientY - r.top - pr.dy));
+      const y = Math.max(8, Math.min(1580, e.clientY - r.top - pr.dy));
       this.setState(function(s){ return {nodes: s.nodes.map(function(n){ return n.id === pr.id ? Object.assign({}, n, {x:x, y:y}) : n; })}; });
     }
     if (pr.kind === 'wire') {
@@ -654,7 +664,7 @@ export default class Flowground extends React.Component {
           React.createElement('circle', {cx:st.pend.x, cy:st.pend.y, r:5, fill:acc})));
       }
     }
-    return React.createElement('svg', {width:1600, height:1400,
+    return React.createElement('svg', {width:1600, height:1650,
       style:{position:'absolute', left:0, top:0, pointerEvents:'none', zIndex:1, overflow:'visible'}}, kids);
   }
 
@@ -988,7 +998,7 @@ export default class Flowground extends React.Component {
 
           <div style={{position:'relative',minWidth:0,minHeight:0}} data-screen-label="Canvas">
             <div style={{position:'absolute',inset:0,overflow:'auto'}}>
-              <div ref={v.canvasRef} onMouseDown={v.onCanvasDown} style={{position:'relative',width:1600,height:1400,background:'#FBF6ED'}}>
+              <div ref={v.canvasRef} onMouseDown={v.onCanvasDown} style={{position:'relative',width:1600,height:1650,background:'#FBF6ED'}}>
                 <div style={v.textureStyle}></div>
                 {v.edgesSvg}
                 {v.nodes.map((n) => (
