@@ -1,3 +1,5 @@
+import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -10,6 +12,7 @@ from app.compiler import build_registry, compile_flow
 from app.llm_client import LLMError
 from app.main import app
 from app.schema import parse_flow
+from app.session import SPEEDS
 
 from flowdefs import llm_flow
 from test_compiler import StubCtx
@@ -102,3 +105,84 @@ def test_llm_generate_with_no_settings_fails_without_any_network_call():
     assert finished["reason"] == "error"
     assert finished["executed"] == "n3"
     assert "AI settings" in finished["logs"][0]["text"]
+
+
+# ---------- auto-mode pacing (Run.record()'s _arm_next_tick) ----------
+
+def _auto_run_timeline(flow_def, speed_ix, llm_impl):
+    """start(mode run) at speed_ix with call_llm patched to llm_impl;
+    returns (started_at, [(monotonic_time, message), ...]) through finished."""
+    timeline = []
+    with patch("app.compiler.call_llm", new=llm_impl):
+        with client.websocket_connect("/api/runs") as ws:
+            ws.send_json({"type": "start", "flow": flow_def, "mode": "run",
+                          "speed": speed_ix,
+                          "llm": {"apiKey": "k", "baseUrl": "https://x"}})
+            started = ws.receive_json()
+            assert started["type"] == "started", started
+            started_at = time.monotonic()
+            while True:
+                msg = ws.receive_json()
+                timeline.append((time.monotonic(), msg))
+                if msg["type"] != "tick":
+                    break
+    assert timeline[-1][1]["type"] == "finished", timeline[-1]
+    return started_at, timeline
+
+
+def test_no_instant_hop_after_slow_llm_call_in_auto_mode():
+    """Regression: a free-running ticker used to keep releasing credits on
+    its own schedule every SPEEDS[speed] ms, even while a handler was still
+    busy — so a slow llm_generate/llm_judge network call let credits bank
+    up, and the very next node fired within a few ms of it resolving. That
+    is easy to miss entirely for a SWITCH block like llm_judge: its own
+    outgoing edge gets replaced by the next tick before a browser ever
+    paints it lit, which reads as "the edge never turns on" even though the
+    state was technically correct for an instant. Now every credit is
+    scheduled fresh from record() — after a node's real work finishes, not
+    from an independent clock — so nothing can ever bank ahead of a slow
+    call."""
+    speed_ix = 2
+    interval = SPEEDS[speed_ix] / 1000.0
+    delay = interval * 1.5  # deliberately longer than one pacing interval
+
+    async def slow_llm(*, mode, base_url, api_key, model, prompt):
+        await asyncio.sleep(delay)
+        return "Yes, definitely."
+
+    started_at, timeline = _auto_run_timeline(llm_flow(), speed_ix, slow_llm)
+    ticks = [(t, m) for t, m in timeline if m["type"] == "tick"]
+    executed_order = [m["executed"] for _, m in ticks]
+    assert "n3" in executed_order and "n4" in executed_order  # llm_generate, llm_judge
+
+    gaps = []
+    prev_t = started_at
+    for t, _ in ticks:
+        gaps.append(t - prev_t)
+        prev_t = t
+    min_gap = min(gaps)
+    assert min_gap > interval * 0.6, (
+        f"smallest gap between consecutive ticks was {min_gap * 1000:.0f}ms — "
+        f"expected at least ~{interval * 1000:.0f}ms (instant-hop regression); "
+        f"all gaps(ms): {[round(g * 1000) for g in gaps]}")
+
+
+def test_normal_auto_pacing_still_roughly_one_interval_apart():
+    """Sanity check the fix didn't change normal pacing the other way: with
+    a FAST llm call (much shorter than one interval), consecutive ticks
+    should still land roughly one interval apart — not doubled, not
+    skipped."""
+    speed_ix = 2
+    interval = SPEEDS[speed_ix] / 1000.0
+
+    async def fast_llm(*, mode, base_url, api_key, model, prompt):
+        return "Yes."
+
+    started_at, timeline = _auto_run_timeline(llm_flow(), speed_ix, fast_llm)
+    ticks = [t for t, m in timeline if m["type"] == "tick"]
+    prev = started_at
+    for t in ticks:
+        gap = t - prev
+        assert interval * 0.5 < gap < interval * 3, (
+            f"gap {gap * 1000:.0f}ms not close to the expected ~{interval * 1000:.0f}ms")
+        prev = t

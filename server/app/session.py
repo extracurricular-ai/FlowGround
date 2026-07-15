@@ -90,18 +90,24 @@ class Run:
         #: a plaintext key (PROTOCOL.md "llm" field).
         self.llm: Dict[str, str] = llm or {}
 
-        # A single-slot gate, not a counting Semaphore: at most one credit is
-        # ever "pending" at a time. With a Semaphore, the ticker keeps
-        # release()-ing every SPEEDS[speed] ms regardless of whether the
-        # previous credit has been claimed yet — harmless for the original
-        # blocks (sub-millisecond handlers) but wrong once a handler can
-        # genuinely take a while (llm_generate/llm_judge's network call):
-        # credits would bank up while it's in flight, then the scheduler
-        # burns through several already-banked credits back-to-back the
-        # moment it resolves, bursting through several nodes with no visible
-        # pacing between them — the opposite of "watch it run at your chosen
-        # speed". set() on an already-set Event is a no-op, so this can never
-        # accumulate past one.
+        # A single-slot gate, armed fresh after each node's real work
+        # finishes (see record()/_arm_next_tick()) — NOT a free-running
+        # ticker. A free-running ticker (or a counting Semaphore fed by one)
+        # keeps releasing credits every SPEEDS[speed] ms on its own schedule
+        # regardless of whether a handler is still busy: harmless for the
+        # original sub-millisecond blocks, but wrong once a handler can
+        # genuinely take a while (llm_generate/llm_judge's network call) —
+        # the ticker fires several times while it's in flight, so the moment
+        # it resolves a credit is ALREADY sitting there and the very next
+        # node fires instantly (often within a few ms), with no visible
+        # pacing at all — easy to miss entirely if it's a SWITCH block like
+        # llm_judge, since its own outgoing edge then gets replaced by the
+        # next one before a browser paint ever shows it lit. Instead, each
+        # credit is scheduled exactly SPEEDS[speed] ms after the PREVIOUS
+        # one was actually consumed AND that node's handler had finished
+        # running (armed from record(), called right after _execute_block
+        # returns) — never from an independent clock, so there is nothing
+        # to bank ahead of a slow handler.
         self._credit_ready = asyncio.Event()
         #: the most recently recorded report — only used by the "engine
         #: stopped without a proper halt" fallback paths below.
@@ -113,7 +119,9 @@ class Run:
         self.scheduler = Scheduler(registry, self.bus, SemaphorePolicy(limit=1))
 
         self.task: Optional[asyncio.Task] = None
-        self.ticker: Optional[asyncio.Task] = None
+        #: the pending one-shot "next credit" timer (armed by
+        #: _arm_next_tick), or None while none is scheduled.
+        self.ticker: Optional[asyncio.TimerHandle] = None
 
     # ---- lifecycle ----
 
@@ -121,7 +129,7 @@ class Run:
         loop = asyncio.get_running_loop()
         self.task = loop.create_task(self._runner())
         if self.auto:
-            self._start_ticker()
+            self._arm_next_tick()
 
     def cancel(self) -> None:
         """Reset/disconnect: stop everything, emit nothing more."""
@@ -176,6 +184,14 @@ class Run:
         if report.halt is not None:
             self._finish(report)
             return
+        # Only now — after this node's real work (acquire_credit() plus
+        # whatever _execute_block() just did, however long that took) has
+        # actually finished — schedule the NEXT credit. Arming it any
+        # earlier (e.g. inside acquire_credit(), right as this node started)
+        # would measure the interval from the wrong point and let it elapse
+        # while this handler is still busy, defeating the whole point.
+        if self.auto:
+            self._arm_next_tick()
         for i, (executed, port, edge_id, target) in enumerate(self._activated_edges(report)):
             self.session.send({
                 "type": "tick",
@@ -264,19 +280,18 @@ class Run:
 
     # ---- pacing controls ----
 
-    def _start_ticker(self) -> None:
+    def _arm_next_tick(self) -> None:
+        """Schedule exactly one future credit release, SPEEDS[speed] ms from
+        NOW — always relative to this call site (a node's real completion,
+        or a fresh resume()/set_speed()), never a free-running interval."""
         self._stop_ticker()
-        self.ticker = asyncio.get_running_loop().create_task(self._tick_loop())
+        self.ticker = asyncio.get_running_loop().call_later(
+            SPEEDS[self.speed] / 1000.0, self._credit_ready.set)
 
     def _stop_ticker(self) -> None:
         if self.ticker is not None:
             self.ticker.cancel()
             self.ticker = None
-
-    async def _tick_loop(self) -> None:
-        while True:
-            await asyncio.sleep(SPEEDS[self.speed] / 1000.0)
-            self._credit_ready.set()
 
     def step(self) -> None:
         self.auto = False
@@ -292,12 +307,12 @@ class Run:
         if self.finished:
             return
         self.auto = True
-        self._start_ticker()
+        self._arm_next_tick()
 
     def set_speed(self, speed: int) -> None:
         self.speed = speed
         if self.auto and not self.finished:
-            self._start_ticker()  # restart the interval, like the prototype
+            self._arm_next_tick()  # restart the interval, like the prototype
 
 
 class Session:
