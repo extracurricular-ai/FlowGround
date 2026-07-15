@@ -30,6 +30,14 @@ Flowground 是一个用于学习和探索逻辑的可视化流程编程演练场
 **[LoopGraph](https://github.com/S2thend/loopgraph)** 调度器。这让 Flowground
 既是一个友好的学习环境,也是一个面向 LoopGraph 执行顺序的可视化调试器。
 
+<p align="center">
+  <img src="assets/screenshot-editor.png" alt="Flowground 编辑器，展示一个包含开始、询问、说、设置变量、分支与合并模块的流程" width="800">
+</p>
+
+<p align="center">
+  <img src="assets/screenshot-run-zh.png" alt="Flowground 中文界面运行中的截图，右侧显示实时变量与旁白式控制台" width="800">
+</p>
+
 ## 你可以搭建什么
 
 - **分支逻辑**，包含条件判断和真/假两条路径

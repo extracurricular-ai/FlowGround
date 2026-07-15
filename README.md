@@ -31,6 +31,14 @@ The canvas is more than a simulation: every visible tick comes from the real
 That makes Flowground both a friendly learning environment and a visual debugger for
 LoopGraph execution order.
 
+<p align="center">
+  <img src="assets/screenshot-editor.png" alt="Flowground editor showing a branching flow with Start, Ask, Say, Set variable, Split, and Merge blocks" width="800">
+</p>
+
+<p align="center">
+  <img src="assets/screenshot-run-zh.png" alt="Flowground mid-run in Chinese, with live variables and a narrated console" width="800">
+</p>
+
 ## What you can build
 
 - **Branching logic** with conditions and true/false paths
