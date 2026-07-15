@@ -14,7 +14,13 @@
   <a href="server/README.md">Backend</a>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+</p>
+
 ---
+
+[中文](README_zh.md)
 
 Flowground is a visual flow-programming playground for learning and exploring logic.
 Drag blocks onto a canvas, connect them into a graph, and follow the program as it runs
@@ -107,3 +113,12 @@ flowground/
 
 - [`PROTOCOL.md`](PROTOCOL.md) — graph schema, endpoints, and run events
 - [`server/README.md`](server/README.md) — backend setup and API routes
+
+## Contributing
+
+Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup and
+PR guidelines.
+
+## License
+
+[MIT](LICENSE)
