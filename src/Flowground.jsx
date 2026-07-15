@@ -1182,6 +1182,7 @@ export default class Flowground extends React.Component {
           </div>
           <div style={{flex:1}}></div>
           <div style={{display:'flex',gap:6,alignItems:'center'}} data-screen-label="Achievements">
+            <button onClick={v.onLoadLLMExample} title="Replace the canvas with an AI Generate / AI Judge demo flow" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Load AI example</button>
             <button onClick={v.onExport} title="Export this flow as JSON" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Export JSON</button>
             <button onClick={v.onOpenLLM} title="AI settings — API key, base URL, compat mode" style={{width:34,height:34,marginRight:6,borderRadius:11,border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#5F5346',font:"800 15px 'Nunito',sans-serif",cursor:'pointer'}}>⚙</button>
             {v.achs.map((a, i) => (
