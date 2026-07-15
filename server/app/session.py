@@ -90,7 +90,19 @@ class Run:
         #: a plaintext key (PROTOCOL.md "llm" field).
         self.llm: Dict[str, str] = llm or {}
 
-        self.credits = asyncio.Semaphore(0)
+        # A single-slot gate, not a counting Semaphore: at most one credit is
+        # ever "pending" at a time. With a Semaphore, the ticker keeps
+        # release()-ing every SPEEDS[speed] ms regardless of whether the
+        # previous credit has been claimed yet — harmless for the original
+        # blocks (sub-millisecond handlers) but wrong once a handler can
+        # genuinely take a while (llm_generate/llm_judge's network call):
+        # credits would bank up while it's in flight, then the scheduler
+        # burns through several already-banked credits back-to-back the
+        # moment it resolves, bursting through several nodes with no visible
+        # pacing between them — the opposite of "watch it run at your chosen
+        # speed". set() on an already-set Event is a no-op, so this can never
+        # accumulate past one.
+        self._credit_ready = asyncio.Event()
         #: the most recently recorded report — only used by the "engine
         #: stopped without a proper halt" fallback paths below.
         self._last_report: Optional[Report] = None
@@ -154,7 +166,8 @@ class Run:
     # ---- run-context API (used by compiled handlers) ----
 
     async def acquire_credit(self) -> None:
-        await self.credits.acquire()
+        await self._credit_ready.wait()
+        self._credit_ready.clear()
 
     def record(self, report: Report) -> None:
         if self.finished:
@@ -263,13 +276,13 @@ class Run:
     async def _tick_loop(self) -> None:
         while True:
             await asyncio.sleep(SPEEDS[self.speed] / 1000.0)
-            self.credits.release()
+            self._credit_ready.set()
 
     def step(self) -> None:
         self.auto = False
         self._stop_ticker()
         if not self.finished:
-            self.credits.release()
+            self._credit_ready.set()
 
     def pause(self) -> None:
         self.auto = False

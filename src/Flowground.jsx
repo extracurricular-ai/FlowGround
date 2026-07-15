@@ -531,13 +531,20 @@ export default class Flowground extends React.Component {
       // (source>port) covers top-level AND a subgraph's own inner edges
       // uniformly; clients resolve which drawn edge a key belongs to at
       // render time (buildEdgesSvg / the subgraph's mini-edges), not here.
-      // Consume by `completed`, NOT `executed`: a subgraph's exit tick
-      // reports `executed` as the ENCLOSING subgraph node (so its own edge
-      // can animate), but `completed` is the literal inner terminal that
-      // just finished — the edge leading into IT is what must be cleared,
-      // or it never turns off (no other tick ever names that terminal).
+      // Consume by BOTH `completed` and `executed`. For an ordinary node
+      // they're always the same id, so the second call is a harmless no-op.
+      // They diverge only on a subgraph's exit tick: `completed` is the
+      // literal inner terminal that just finished (the edge leading into IT
+      // must clear, or it never turns off — no other tick ever names that
+      // terminal), while `executed` is overridden to the ENCLOSING subgraph
+      // node (so its own out-edge can animate) — but nothing else ever
+      // reports a subgraph node as `completed` either, since it has no real
+      // handler of its own. Without also consuming by `executed` here, the
+      // edge feeding INTO the subgraph (e.g. a loop's "repeat" arrow) never
+      // clears, and it visibly coexists with "done" once the loop finishes.
       this.setState(function(s){
-        const activeEdges = self.consumeEdgesInto(s.activeEdges, msg.completed);
+        let activeEdges = self.consumeEdgesInto(s.activeEdges, msg.completed);
+        activeEdges = self.consumeEdgesInto(activeEdges, msg.executed);
         if (msg.port != null) activeEdges[msg.executed + '>' + msg.port] = msg.next;
         return {
           console: s.console.concat(msg.logs || []).slice(-200),

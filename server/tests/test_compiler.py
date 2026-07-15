@@ -261,6 +261,10 @@ def test_doubly_nested_subgraph_scopes_are_correct():
     assert "n1" not in compiled.parent_scope  # top-level ids have no parent
 
 
+async def _no_wait():
+    return None
+
+
 async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
     """The regression this guards: b_end (2 levels deep) completing must be
     reported via its DIRECT parent (a_sub, whose own edge goes -> a_mid),
@@ -278,7 +282,7 @@ async def test_doubly_nested_subgraph_exit_ticks_resolve_to_direct_parent():
             sent.append(message)
 
     run = Run(StubSession(), compiled, "run", speed=2, run_id="r1")
-    run.credits._value = 10**6  # let every acquire_credit() through immediately
+    run.acquire_credit = _no_wait  # let every acquire_credit() through immediately
     await run.scheduler.run(compiled.graph, initial_payload={})
 
     ticks = [t for t in sent if t["type"] == "tick"]
