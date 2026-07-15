@@ -1,5 +1,6 @@
 import React from 'react';
-import { RunClient, SERVER_DOWN_MSG } from './runClient.js';
+import { RunClient } from './runClient.js';
+import { I18N } from './i18n.js';
 
 export default class Flowground extends React.Component {
   constructor(props) {
@@ -16,20 +17,22 @@ export default class Flowground extends React.Component {
     // implicitly clears it.
     this._pendingStart = null;
 
+    // label/desc live in i18n.js (keyed b_<type>_label/desc via blockLabel()/
+    // blockDesc()) — TYPES itself only holds language-independent structure.
     this.TYPES = {
-      start: { label: 'Start', color: '#7FA284', glyph: '▶', desc: 'Begin the flow' },
-      ask:   { label: 'Ask',   color: '#4E939B', glyph: '?', desc: 'Get a value from the user' },
-      say:   { label: 'Say',   color: '#E8684A', glyph: '“', desc: 'Print a message' },
-      set:   { label: 'Set variable', color: '#E2A23B', glyph: '=', desc: 'Remember a value' },
-      iff:   { label: 'If',    color: '#B0708F', glyph: '◆', desc: 'Choose a path' },
-      loop:  { label: 'Loop',  color: '#B65C3F', glyph: '↺', desc: 'Repeat steps' },
-      fn:    { label: 'Function', color: '#8E7CC3', glyph: 'ƒ', desc: 'Use a mini-machine' },
-      split: { label: 'Split', color: '#3B8EA5', glyph: '⑂', desc: 'Run two branches at once' },
-      merge: { label: 'Merge', color: '#5B7F3B', glyph: '⑃', desc: 'Wait for every branch, then continue' },
-      subgraph: { label: 'Subgraph', color: '#9A6B3F', glyph: '▣', desc: 'A whole mini-flow, packed into one block' },
-      llm_generate: { label: 'AI Generate', color: '#6B5FA6', glyph: '✦', desc: 'Ask an LLM to write something' },
-      llm_judge:    { label: 'AI Judge',    color: '#9169A8', glyph: '✧', desc: 'Let an LLM decide yes or no' },
-      end:   { label: 'End',   color: '#8B8178', glyph: '■', desc: 'Finish the flow' }
+      start: { color: '#7FA284', glyph: '▶' },
+      ask:   { color: '#4E939B', glyph: '?' },
+      say:   { color: '#E8684A', glyph: '“' },
+      set:   { color: '#E2A23B', glyph: '=' },
+      iff:   { color: '#B0708F', glyph: '◆' },
+      loop:  { color: '#B65C3F', glyph: '↺' },
+      fn:    { color: '#8E7CC3', glyph: 'ƒ' },
+      split: { color: '#3B8EA5', glyph: '⑂' },
+      merge: { color: '#5B7F3B', glyph: '⑃' },
+      subgraph: { color: '#9A6B3F', glyph: '▣' },
+      llm_generate: { color: '#6B5FA6', glyph: '✦' },
+      llm_judge:    { color: '#9169A8', glyph: '✧' },
+      end:   { color: '#8B8178', glyph: '■' }
     };
     this.ORDER = ['start','ask','say','set','iff','loop','fn','llm_generate','llm_judge','split','merge','subgraph','end'];
     // block -> required LoopGraph kind (PROTOCOL.md block table).
@@ -39,19 +42,16 @@ export default class Flowground extends React.Component {
     // buildMini (the content it draws inside), so the two never disagree.
     this.MINI_HEAD = 30;
     this.SPEEDS = [{label:'0.5×',ms:1400},{label:'1×',ms:850},{label:'2×',ms:420}];
-    this.ACHS = [
-      {id:'tutorial', label:'Trained up',     desc:'Finished the tutorial'},
-      {id:'wire',     label:'Wire wizard',    desc:'Connected two blocks'},
-      {id:'run',      label:'First flight',   desc:'Ran a flow to the end'},
-      {id:'decider',  label:'Decision maker', desc:'Ran an If block'},
-      {id:'looper',   label:'Round tripper',  desc:'Completed a loop'}
-    ];
+    // achievement label/desc live in i18n.js (a_<id>_label/desc).
+    this.ACHS = ['tutorial', 'wire', 'run', 'decider', 'looper'];
+    // tutorial title/body/next-label live in i18n.js (tut_<i>_t/b/next) —
+    // only each step's fixed screen position stays here.
     this.TUT = [
-      {t:'Welcome to Flowground', b:'Programs are just flows: steps, decisions, and loops. Here you draw them — and then watch them actually run.', next:'Show me', pos:{left:'50%',top:'32%',transform:'translateX(-50%)'}},
-      {t:'Your blocks', b:'Each block is one instruction. Drag any block onto the canvas — or just click it to drop one in.', next:'Next', pos:{left:'240px',top:'110px'}},
-      {t:'Wire it up', b:'Every block has a dot underneath. Drag from a dot to another block to draw an arrow — that is the order things happen. Click a block to edit its words and numbers.', next:'Next', pos:{left:'46%',top:'40%',transform:'translateX(-50%)'}},
-      {t:'Press Run', b:'Run walks through your flow one block at a time, lighting up the path it takes. Use Step to move one instruction at a time, and the speed switch to slow things down.', next:'Next', pos:{left:'50%',top:'72px',transform:'translateX(-50%)'}},
-      {t:'Watch it think', b:'Variables show what the flow remembers, and the console tells the story of every step. Ready — press Run and watch the starter flow loop!', next:'Let’s go', pos:{right:'310px',top:'110px'}}
+      {pos:{left:'50%',top:'32%',transform:'translateX(-50%)'}},
+      {pos:{left:'240px',top:'110px'}},
+      {pos:{left:'46%',top:'40%',transform:'translateX(-50%)'}},
+      {pos:{left:'50%',top:'72px',transform:'translateX(-50%)'}},
+      {pos:{right:'310px',top:'110px'}}
     ];
 
     let ach = {}; let tutDone = false;
@@ -63,6 +63,14 @@ export default class Flowground extends React.Component {
     // computer.tldraw.com's single bring-your-own-key settings panel).
     let llm = {apiKey:'', baseUrl:'https://api.anthropic.com', mode:'anthropic', model:'claude-3-5-haiku-20241022'};
     try { llm = Object.assign({}, llm, JSON.parse(localStorage.getItem('flowground.llm') || '{}')); } catch (e) {}
+    // UI language: explicit choice persists; first visit falls back to the
+    // browser's own locale. Scope is interface chrome only — the live run
+    // console is narrated by the backend in English regardless (see i18n.js).
+    let lang = 'en';
+    try {
+      lang = localStorage.getItem('flowground.lang')
+        || ((navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en');
+    } catch (e) {}
 
     this.state = {
       // Parallel run -> merge -> loop whose body is a subgraph node that is
@@ -111,7 +119,7 @@ export default class Flowground extends React.Component {
       running: false, paused: false, curId: null, activeEdges: {},
       vars: {}, steps: 0, console: [],
       speedIx: 1, ach: ach, toast: null, tut: tutDone ? -1 : 0, exportOn: false, exportFmt: 'lg', copied: false,
-      llm: llm, llmOn: false
+      llm: llm, llmOn: false, lang: lang
     };
   }
 
@@ -163,12 +171,31 @@ export default class Flowground extends React.Component {
     };
   }
 
+  // ---------- i18n (interface chrome only — see i18n.js header comment) ----------
+  t(key, vars) {
+    const dict = I18N[this.state.lang] || I18N.en;
+    let s = dict[key] != null ? dict[key] : (I18N.en[key] != null ? I18N.en[key] : key);
+    if (vars) { Object.keys(vars).forEach(function(k){ s = s.split('{' + k + '}').join(String(vars[k])); }); }
+    return s;
+  }
+  setLang(lang) {
+    this.setState({lang: lang});
+    try { localStorage.setItem('flowground.lang', lang); } catch (e) {}
+  }
+  blockLabel(type) { return this.t('b_' + type + '_label'); }
+  blockDesc(type) { return this.t('b_' + type + '_desc'); }
+  achLabel(id) { return this.t('a_' + id + '_label'); }
+  achDesc(id) { return this.t('a_' + id + '_desc'); }
+  tutT(i) { return this.t('tut_' + i + '_t'); }
+  tutB(i) { return this.t('tut_' + i + '_b'); }
+  tutNext(i) { return this.t('tut_' + i + '_next'); }
+
   // ---------- helpers ----------
   acc() { return this.props.accent || '#E8684A'; }
   portsOf(type) {
-    if (type === 'iff')   return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
-    if (type === 'loop')  return [{port:'repeat',label:'again',color:'#B65C3F'},{port:'done',label:'done',color:'#8B8178'}];
-    if (type === 'llm_judge') return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
+    if (type === 'iff' || type === 'llm_judge')
+      return [{port:'true',label:this.t('port_yes'),color:'#6E9A72'},{port:'false',label:this.t('port_no'),color:'#C4553B'}];
+    if (type === 'loop')  return [{port:'repeat',label:this.t('port_again'),color:'#B65C3F'},{port:'done',label:this.t('port_done'),color:'#8B8178'}];
     if (type === 'split') return [{port:'a',label:'A',color:'#3B8EA5'},{port:'b',label:'B',color:'#2E6E80'}];
     if (type === 'end')   return [];
     return [{port:'out',label:'',color:this.TYPES[type].color}];
@@ -417,8 +444,9 @@ export default class Flowground extends React.Component {
   }
   serverDown() {
     this._pendingStart = null;
+    const msg = this.t('serverDown');
     this.setState(function(s){ return {
-      console: s.console.concat([{kind:'err', text:SERVER_DOWN_MSG}]).slice(-200),
+      console: s.console.concat([{kind:'err', text:msg}]).slice(-200),
       running:false, paused:false, curId:null, activeEdges:{}
     }; });
   }
@@ -431,7 +459,7 @@ export default class Flowground extends React.Component {
   }
   startRun(mode) {
     const start = this.state.nodes.find(function(n){ return n.type === 'start'; });
-    if (!start) { this.log('err', 'Add a Start block first — every flow needs one.'); return; }
+    if (!start) { this.log('err', this.t('errNoStart')); return; }
     const self = this;
     const gen = ++this._runGen;
     this._pendingStart = gen;
@@ -571,8 +599,7 @@ export default class Flowground extends React.Component {
     if (this.state.ach[id]) return;
     const ach = Object.assign({}, this.state.ach); ach[id] = true;
     try { localStorage.setItem('flowground.ach', JSON.stringify(ach)); } catch (e) {}
-    const def = this.ACHS.find(function(a){ return a.id === id; });
-    this.setState({ach:ach, toast:def});
+    this.setState({ach:ach, toast:id});
     clearTimeout(this._toastT);
     const self = this;
     this._toastT = setTimeout(function(){ self.setState({toast:null}); }, 3200);
@@ -719,7 +746,9 @@ export default class Flowground extends React.Component {
         L.push('    # this node has no handler; see its config["graph"].');
         L.push('    raise NotImplementedError  # exported for reference only'); break;
       default:
-        L.push('    # ' + this.TYPES[node.type].label.toLowerCase());
+        // Exported Python source stays English regardless of UI language —
+        // I18N.en directly, not blockLabel()/this.t() (which follow state.lang).
+        L.push('    # ' + (I18N.en['b_' + node.type + '_label'] || node.type).toLowerCase());
         L.push('    return payload');
     }
     return L.join('\n');
@@ -831,7 +860,7 @@ export default class Flowground extends React.Component {
 
     const palette = this.ORDER.map(function(t) {
       const T = self.TYPES[t];
-      return {label:T.label, desc:T.desc, glyph:T.glyph, chipStyle:chip(T.color, 30),
+      return {label:self.blockLabel(t), desc:self.blockDesc(t), glyph:T.glyph, chipStyle:chip(T.color, 30),
         onMouseDown:function(e){ self.onPaletteDown(t, e); }};
     });
 
@@ -842,20 +871,20 @@ export default class Flowground extends React.Component {
         case 'say':  return '"' + d.text + '"';
         case 'set':  return d.name + ' = ' + d.expr;
         case 'iff':  return d.cond + ' ?';
-        case 'loop': return (d.mode === 'while') ? 'while ' + d.cond : d.times + '× around';
+        case 'loop': return (d.mode === 'while') ? self.t('sub_loopWhile', {cond: d.cond}) : self.t('sub_loopCount', {times: d.times});
         case 'fn':   return d.result + ' = ' + d.fn + '(' + d.arg + ')';
         case 'llm_generate': return d.result + ' = AI("' + d.prompt + '")';
-        case 'llm_judge':    return 'AI: ' + d.prompt + ' ?';
-        case 'start':return 'entry point';
-        case 'split':return 'run both branches';
-        case 'merge':return 'wait for both, then continue';
+        case 'llm_judge':    return self.t('sub_aiPrefix') + d.prompt + self.t('sub_qSuffix');
+        case 'start':return self.t('sub_entryPoint');
+        case 'split':return self.t('sub_runBothBranches');
+        case 'merge':return self.t('sub_waitForBoth');
         case 'subgraph': {
           let times = '2';
           const loopN = (d.graph.nodes || []).find(function(x){ return x.type === 'loop'; });
           if (loopN) times = loopN.data.times || times;
-          return 'nested ' + times + '× loop';
+          return self.t('sub_nested') + times + self.t('sub_loopSuffix');
         }
-        case 'end':  return 'all done';
+        case 'end':  return self.t('sub_allDone');
         default: return '';
       }
     };
@@ -875,12 +904,12 @@ export default class Flowground extends React.Component {
       const HEAD = self.MINI_HEAD, CW = L.cardW, CH = L.cardH;
       const miniNodes = L.order.map(function(id) {
         const gn = L.byId[id];
-        const T = self.TYPES[gn.type] || {glyph:'?', color:'#8B8178', label:'?'};
+        const T = self.TYPES[gn.type] || {glyph:'?', color:'#8B8178'};
         const p = L.pos[id];
         const on = st.running && st.curId === id;
         const ps = self.portsOf(gn.type);
         return {
-          id: id, glyph: T.glyph, title: T.label, sub: subOf(gn),
+          id: id, glyph: T.glyph, title: self.blockLabel(gn.type), sub: subOf(gn),
           chipStyle: chip(T.color, 26),
           wrapStyle: {position:'absolute', left:p.x, top:p.y + HEAD, width:CW, height:CH, boxSizing:'border-box',
             display:'flex', alignItems:'center', gap:9, padding:'0 11px', background:'#FFFDF8',
@@ -922,7 +951,7 @@ export default class Flowground extends React.Component {
       const active = st.running && (st.curId === n.id || (mini && mini.order.indexOf(st.curId) !== -1));
       const ps = self.portsOf(n.type);
       return {
-        id: n.id, glyph: T.glyph, title: T.label, sub: subOf(n), mini: mini,
+        id: n.id, glyph: T.glyph, title: self.blockLabel(n.type), sub: subOf(n), mini: mini,
         chipStyle: chip(T.color, 30),
         wrapStyle: {position:'absolute', left:n.x, top:n.y, width:sz.w, height:sz.h, boxSizing:'border-box',
           display: mini ? 'block' : 'flex', alignItems:'center', gap:10,
@@ -955,7 +984,7 @@ export default class Flowground extends React.Component {
     let inspFields = [], inspHint = '', inspTitle = '', inspGlyph = '', inspChipStyle = null;
     if (selN) {
       const T = this.TYPES[selN.type];
-      inspTitle = T.label + ' block'; inspGlyph = T.glyph; inspChipStyle = chip(T.color, 28);
+      inspTitle = this.t('inspTitleSuffix', {label: this.blockLabel(selN.type)}); inspGlyph = T.glyph; inspChipStyle = chip(T.color, 28);
       const field = function(key, label) {
         return {label:label, isText:true, isSelect:false, value:String(selN.data[key] == null ? '' : selN.data[key]),
           onChange:function(ev){ const v = ev.target.value;
@@ -968,38 +997,37 @@ export default class Flowground extends React.Component {
         const f = field(key, label); f.isText = false; f.isTextarea = true; return f;
       };
       switch (selN.type) {
-        case 'ask': inspFields = [field('name', 'Save answer as'), field('value', 'Sample answer')];
-          inspHint = 'In a real app the user types the answer — here you choose it in advance.'; break;
-        case 'say': inspFields = [field('text', 'Message')];
-          inspHint = 'Wrap a variable in {curly braces} to drop it into your sentence.'; break;
-        case 'set': inspFields = [field('name', 'Variable name'), field('expr', 'Value')];
-          inspHint = 'Math (lap + 1), text (hello or hi {name}), or true / false.'; break;
-        case 'iff': inspFields = [field('cond', 'Question to ask')];
-          inspHint = 'Try: count > 3   or   name == "Ada". Yes goes left, no goes right.'; break;
+        case 'ask': inspFields = [field('name', this.t('f_saveAnswerAs')), field('value', this.t('f_sampleAnswer'))];
+          inspHint = this.t('h_ask'); break;
+        case 'say': inspFields = [field('text', this.t('f_message'))];
+          inspHint = this.t('h_say'); break;
+        case 'set': inspFields = [field('name', this.t('f_variableName')), field('expr', this.t('f_value'))];
+          inspHint = this.t('h_set'); break;
+        case 'iff': inspFields = [field('cond', this.t('f_questionToAsk'))];
+          inspHint = this.t('h_iff'); break;
         case 'loop': {
           const mode = selN.data.mode || 'count';
-          const mf = selectField('mode', 'Loop kind', ['count', 'while']); mf.value = mode;
+          const mf = selectField('mode', this.t('f_loopKind'), ['count', 'while']); mf.value = mode;
           mf.onChange = function(ev){ const v = ev.target.value;
             self.updateCurGraph(function(nodes, edges){ return {nodes: nodes.map(function(n){ if (n.id !== selN.id) return n;
               const d = Object.assign({}, n.data, {mode:v});
               if (v === 'while' && !d.cond) d.cond = 'lap < 4';
               if (v === 'count' && !d.times) d.times = '3';
               return Object.assign({}, n, {data:d}); }), edges: edges}; }); };
-          inspFields = mode === 'while' ? [mf, field('cond', 'Keep going while')] : [mf, field('times', 'Times around')];
-          inspHint = mode === 'while' ? 'A real while-loop: repeats as long as this is true. Change a variable inside the loop — or it never stops!'
-                                      : 'A for-loop: goes around a fixed number of times. Wire the last block of the loop back into this one.';
+          inspFields = mode === 'while' ? [mf, field('cond', this.t('f_keepGoingWhile'))] : [mf, field('times', this.t('f_timesAround'))];
+          inspHint = mode === 'while' ? this.t('h_loopWhile') : this.t('h_loopCount');
           break; }
-        case 'fn': inspFields = [selectField('fn', 'Mini-machine', ['double', 'square', 'shout']), field('arg', 'Give it'), field('result', 'Save result as')];
-          inspHint = 'double ×2 · square x·x · shout MAKES IT LOUD'; break;
-        case 'llm_generate': inspFields = [textareaField('prompt', 'Prompt'), field('result', 'Save reply as')];
-          inspHint = 'Wrap a variable in {curly braces}. Uses your AI settings (⚙ in the header) — add an API key there first.'; break;
-        case 'llm_judge': inspFields = [textareaField('prompt', 'Question to ask the AI')];
-          inspHint = 'A yes/no question — wrap a variable in {curly braces}. A reply starting with "yes" routes yes, anything else routes no. Uses your AI settings (⚙ in the header).'; break;
-        case 'start': inspHint = 'Every flow begins here. There is nothing to set.'; break;
-        case 'split': inspHint = 'Both of its arrows fire at once — LoopGraph runs branch A and branch B, one after the other, before anything downstream of both can continue.'; break;
-        case 'merge': inspHint = 'Waits for every branch that arrows into it to finish, then continues once — wire both branches of a Split here to join them back up.'; break;
-        case 'subgraph': inspHint = 'A whole mini-flow packed into one block, run by LoopGraph as a real nested sub-workflow. Double-click it — or press Open below — to step inside and edit its own Start, blocks and End.'; break;
-        case 'end': inspHint = 'When the flow reaches this block, it stops.'; break;
+        case 'fn': inspFields = [selectField('fn', this.t('f_miniMachine'), ['double', 'square', 'shout']), field('arg', this.t('f_giveIt')), field('result', this.t('f_saveResultAs'))];
+          inspHint = this.t('h_fn'); break;
+        case 'llm_generate': inspFields = [textareaField('prompt', this.t('f_prompt')), field('result', this.t('f_saveReplyAs'))];
+          inspHint = this.t('h_llmGenerate'); break;
+        case 'llm_judge': inspFields = [textareaField('prompt', this.t('f_questionForAI'))];
+          inspHint = this.t('h_llmJudge'); break;
+        case 'start': inspHint = this.t('h_start'); break;
+        case 'split': inspHint = this.t('h_split'); break;
+        case 'merge': inspHint = this.t('h_merge'); break;
+        case 'subgraph': inspHint = this.t('h_subgraph'); break;
+        case 'end': inspHint = this.t('h_end'); break;
       }
     }
 
@@ -1023,9 +1051,9 @@ export default class Flowground extends React.Component {
     const varsList = Object.keys(st.vars).map(function(k){ return {name:k, value:self.fmt(st.vars[k])}; });
 
     // header
-    const achs = this.ACHS.map(function(a) {
-      const on = !!st.ach[a.id];
-      return {title: a.label + ' — ' + a.desc + (on ? '' : ' (locked)'),
+    const achs = this.ACHS.map(function(id) {
+      const on = !!st.ach[id];
+      return {title: self.achLabel(id) + ' — ' + self.achDesc(id) + (on ? '' : self.t('achLocked')),
         style:{width:26, height:26, borderRadius:'50%', display:'grid', placeItems:'center', fontSize:11.5, cursor:'default',
           background: on ? '#F2B63C' : '#F4EBDC', color: on ? '#7A5A12' : '#D3C3A9',
           border: on ? '1.5px solid #D99C22' : '1.5px dashed #D8C7AE', boxSizing:'border-box'}};
@@ -1077,28 +1105,40 @@ export default class Flowground extends React.Component {
       pathTrail: pathTrail,
       onCrumbHome: function(){ self.goToPath(0); },
       onCrumbTo: function(depth){ self.goToPath(depth); },
+      mainFlowLabel: this.t('mainFlow'),
 
       inspectorOpen: !!selN, inspTitle: inspTitle, inspGlyph: inspGlyph, inspChipStyle: inspChipStyle,
       inspFields: inspFields, inspHint: inspHint,
       inspIsSubgraph: !!(selN && selN.type === 'subgraph'),
       onOpenSubgraph: function(){ if (selN) self.enterSubgraph(selN.id); },
       onDeleteNode: function(){ if (selN) self.deleteNode(selN.id); },
+      openSubgraphBtnLabel: this.t('openSubgraphBtn'), removeBlockLabel: this.t('removeBlock'),
 
-      runLabel: !st.running ? '▶  Run' : (st.paused ? '▶  Resume' : '❚❚  Pause'),
+      runLabel: !st.running ? this.t('runRun') : (st.paused ? this.t('runResume') : this.t('runPause')),
       runBtnStyle: {background:acc, border:'none', borderRadius:11, padding:'8px 18px', font:"800 13px 'Nunito',sans-serif",
         color:'#FFF', cursor:'pointer', boxShadow:'0 3px 10px ' + acc + '55', minWidth:104},
       onRun: function(){ self.onRunClick(); },
       onStep: function(){ self.onStepClick(); },
       onReset: function(){ self.onResetClick(); },
+      stepLabel: this.t('step'), resetLabel: this.t('reset'),
       speeds: speeds,
-      runStatus: st.running ? ('step ' + st.steps + (st.paused ? ' · paused' : '')) : '',
+      runStatus: st.running ? (this.t('runStatus', {n: st.steps}) + (st.paused ? this.t('pausedSuffix') : '')) : '',
 
       achs: achs,
       onTutorial: function(){ self.setState({tut:0}); },
+      replayTutorialTitle: this.t('replayTutorial'),
+
+      lang: st.lang, langToggleLabel: this.t('langToggle'),
+      onToggleLang: function(){ self.setLang(st.lang === 'en' ? 'zh' : 'en'); },
+
+      loadAIExampleLabel: this.t('loadAIExample'), loadAIExampleTitle: this.t('loadAIExampleTitle'),
+      exportJSONLabel: this.t('exportJSON'), exportJSONTitle: this.t('exportJSONTitle'),
+      aiSettingsTitle: this.t('aiSettingsTitle'),
 
       exportOn: st.exportOn,
       exportJson: st.exportOn ? this.currentExport() : '',
-      exportTabs: [{id:'lg', label:'LoopGraph + Python'}, {id:'fg', label:'Flowground'}].map(function(t) {
+      exportFlowTitle: this.t('exportFlowTitle'),
+      exportTabs: [{id:'lg', label:this.t('exportTabLG')}, {id:'fg', label:this.t('exportTabFG')}].map(function(t) {
         const on = st.exportFmt === t.id;
         return {label:t.label,
           style:{border:'none', borderRadius:8, padding:'5px 12px', cursor:'pointer',
@@ -1106,19 +1146,21 @@ export default class Flowground extends React.Component {
             color: on ? '#43382E' : '#A08F79', boxShadow: on ? '0 1px 3px rgba(90,60,30,.15)' : 'none'},
           onClick:function(){ self.setState({exportFmt:t.id, copied:false}); }};
       }),
-      exportDesc: st.exportFmt === 'lg'
-        ? 'Graph for the LoopGraph engine (nodes, edges, entry) plus a function_registry table — real async Python handlers, one per block. If and Loop blocks become SWITCH routers.'
-        : 'Flowground’s own format: blocks with config, ports and canvas positions.',
+      exportDesc: st.exportFmt === 'lg' ? this.t('exportDescLG') : this.t('exportDescFG'),
       onExport: function(){ self.setState({exportOn:true, copied:false}); },
       onExportClose: function(){ self.setState({exportOn:false}); },
       onExportCopy: function(){ self.copyExport(); },
       onExportDownload: function(){ self.downloadExport(); },
-      copyLabel: st.copied ? 'Copied!' : 'Copy',
+      copyLabel: st.copied ? this.t('copied') : this.t('copy'),
+      downloadJSONLabel: this.t('downloadJSON'),
 
       llmOn: st.llmOn,
       onOpenLLM: function(){ self.setState({llmOn:true}); },
       onCloseLLM: function(){ self.setState({llmOn:false}); },
       onLoadLLMExample: function(){ self.loadLLMExample(); },
+      aiSettingsLabel: this.t('aiSettings'), aiSettingsDescText: this.t('aiSettingsDesc'),
+      compatModeLabel: this.t('compatMode'), modeAnthropicLabel: this.t('modeAnthropic'), modeOpenAILabel: this.t('modeOpenAI'),
+      baseURLLabel: this.t('baseURL'), apiKeyLabel: this.t('apiKey'), modelLabel: this.t('model'),
       llmApiKey: st.llm.apiKey, llmBaseUrl: st.llm.baseUrl, llmModel: st.llm.model, llmMode: st.llm.mode,
       onLLMApiKeyChange: function(ev){ self.saveLLM({apiKey: ev.target.value}); },
       onLLMBaseUrlChange: function(ev){ self.saveLLM({baseUrl: ev.target.value}); },
@@ -1137,23 +1179,31 @@ export default class Flowground extends React.Component {
 
       varsList: varsList, varsEmpty: varsList.length === 0,
       consoleLines: consoleLines, consoleEmpty: consoleLines.length === 0,
+      variablesLabel: this.t('variables'), varsEmptyText: this.t('varsEmpty'),
+      consoleLabel: this.t('console'), consoleEmptyText: this.t('consoleEmpty'),
+      taglineText: this.t('tagline'),
+      blocksHeaderLabel: this.t('blocksHeader'), dragOrClickToAddTitle: this.t('dragOrClickToAdd'),
+      dragArrowHintText: this.t('dragArrowHint'), dragToConnectTitle: this.t('dragToConnect'),
+      openSubgraphTooltip: this.t('openSubgraph'),
 
       ghost: !!g,
       ghostStyle: g ? {position:'fixed', left:g.x + 12, top:g.y + 8, zIndex:70, display:'flex', alignItems:'center', gap:8,
         padding:'8px 12px', background:'#FFFDF8', border:'1.5px solid #E4D5BF', borderRadius:12,
         boxShadow:'0 10px 24px rgba(90,60,30,.22)', pointerEvents:'none'} : null,
       ghostChipStyle: gT ? chip(gT.color, 24) : null,
-      ghostGlyph: gT ? gT.glyph : '', ghostLabel: gT ? gT.label : '',
+      ghostGlyph: gT ? gT.glyph : '', ghostLabel: g ? this.blockLabel(g.type) : '',
 
       toast: !!st.toast,
-      toastTitle: st.toast ? st.toast.label : '', toastDesc: st.toast ? st.toast.desc : '',
+      toastAchLabel: this.t('achUnlocked'),
+      toastTitle: st.toast ? this.achLabel(st.toast) : '', toastDesc: st.toast ? this.achDesc(st.toast) : '',
 
       tutOn: !!tut,
       tutStyle: tut ? Object.assign({position:'fixed', width:330, background:'#FFFDF8', borderRadius:18, padding:'18px 18px 12px',
         zIndex:51, boxShadow:'0 24px 60px rgba(50,30,10,.4)', display:'flex', flexDirection:'column', gap:7, animation:'fadein .25s'}, tut.pos) : null,
-      tutStepLabel: tut ? ('Tip ' + (st.tut + 1) + ' of ' + this.TUT.length) : '',
-      tutTitle: tut ? tut.t : '', tutBody: tut ? tut.b : '',
-      tutNextLabel: tut ? tut.next : '',
+      tutStepLabel: tut ? this.t('tutStepLabel', {n: st.tut + 1, total: this.TUT.length}) : '',
+      tutTitle: tut ? this.tutT(st.tut) : '', tutBody: tut ? this.tutB(st.tut) : '',
+      tutNextLabel: tut ? this.tutNext(st.tut) : '',
+      tutSkipLabel: this.t('tutSkip'),
       tutNextStyle: {background:acc, border:'none', borderRadius:10, padding:'8px 16px', font:"800 12.5px 'Nunito',sans-serif", color:'#FFF', cursor:'pointer'},
       tutDots: tutDots,
       onTutNext: function(){ if (st.tut >= self.TUT.length - 1) self.finishTut(true); else self.setState({tut:st.tut + 1}); },
@@ -1172,14 +1222,14 @@ export default class Flowground extends React.Component {
             <div style={{width:32,height:32,borderRadius:10,background:'#E8684A',display:'grid',placeItems:'center',color:'#FFF',font:"900 15px 'Nunito',sans-serif",boxShadow:'0 3px 8px rgba(232,104,74,.35)'}}>⌁</div>
             <div style={{display:'flex',flexDirection:'column',lineHeight:1.15}}>
               <span style={{font:"900 15px 'Nunito',sans-serif",color:'#43382E'}}>Flowground</span>
-              <span style={{font:"700 10.5px 'Nunito',sans-serif",color:'#B3A186'}}>learn logic by drawing it</span>
+              <span style={{font:"700 10.5px 'Nunito',sans-serif",color:'#B3A186'}}>{v.taglineText}</span>
             </div>
           </div>
           <div style={{flex:1}}></div>
           <div style={{display:'flex',alignItems:'center',gap:8}} data-screen-label="Run controls">
             <button onClick={v.onRun} style={v.runBtnStyle}>{v.runLabel}</button>
-            <button onClick={v.onStep} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Step</button>
-            <button onClick={v.onReset} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Reset</button>
+            <button onClick={v.onStep} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>{v.stepLabel}</button>
+            <button onClick={v.onReset} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>{v.resetLabel}</button>
             <div style={{display:'flex',background:'#F1E7D6',borderRadius:11,padding:3,gap:2}}>
               {v.speeds.map((s, i) => (
                 <button key={i} onClick={s.onClick} style={s.style}>{s.label}</button>
@@ -1189,22 +1239,23 @@ export default class Flowground extends React.Component {
           </div>
           <div style={{flex:1}}></div>
           <div style={{display:'flex',gap:6,alignItems:'center'}} data-screen-label="Achievements">
-            <button onClick={v.onLoadLLMExample} title="Replace the canvas with an AI Generate / AI Judge demo flow" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Load AI example</button>
-            <button onClick={v.onExport} title="Export this flow as JSON" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Export JSON</button>
-            <button onClick={v.onOpenLLM} title="AI settings — API key, base URL, compat mode" style={{width:34,height:34,marginRight:6,borderRadius:11,border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#5F5346',font:"800 15px 'Nunito',sans-serif",cursor:'pointer'}}>⚙</button>
+            <button onClick={v.onLoadLLMExample} title={v.loadAIExampleTitle} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>{v.loadAIExampleLabel}</button>
+            <button onClick={v.onExport} title={v.exportJSONTitle} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>{v.exportJSONLabel}</button>
+            <button onClick={v.onOpenLLM} title={v.aiSettingsTitle} style={{width:34,height:34,borderRadius:11,border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#5F5346',font:"800 15px 'Nunito',sans-serif",cursor:'pointer'}}>⚙</button>
+            <button onClick={v.onToggleLang} style={{marginRight:6,borderRadius:11,border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#5F5346',padding:'7px 12px',font:"800 12.5px 'Nunito',sans-serif",cursor:'pointer'}}>{v.langToggleLabel}</button>
             {v.achs.map((a, i) => (
               <div key={i} title={a.title} style={a.style}>★</div>
             ))}
-            <button onClick={v.onTutorial} title="Replay the tutorial" style={{width:28,height:28,marginLeft:6,borderRadius:'50%',border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#A08F79',font:"800 13px 'Nunito',sans-serif",cursor:'pointer'}}>?</button>
+            <button onClick={v.onTutorial} title={v.replayTutorialTitle} style={{width:28,height:28,marginLeft:6,borderRadius:'50%',border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#A08F79',font:"800 13px 'Nunito',sans-serif",cursor:'pointer'}}>?</button>
           </div>
         </div>
 
         <div style={{display:'grid',gridTemplateColumns:'222px minmax(0,1fr) 292px',minHeight:0}}>
 
           <div data-screen-label="Block palette" style={{background:'#FFFDF8',borderRight:'1.5px solid #EADCC8',padding:'14px 12px',display:'flex',flexDirection:'column',gap:7,overflowY:'auto'}}>
-            <div style={{font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79',marginBottom:3}}>Blocks</div>
+            <div style={{font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79',marginBottom:3}}>{v.blocksHeaderLabel}</div>
             {v.palette.map((b, i) => (
-              <div key={i} className="pal-item" onMouseDown={b.onMouseDown} title="Drag onto the canvas, or click to add" style={{display:'flex',gap:10,alignItems:'center',padding:'8px 10px',background:'#FFF',border:'1.5px solid #EFE3D0',borderRadius:12,cursor:'grab',userSelect:'none'}}>
+              <div key={i} className="pal-item" onMouseDown={b.onMouseDown} title={v.dragOrClickToAddTitle} style={{display:'flex',gap:10,alignItems:'center',padding:'8px 10px',background:'#FFF',border:'1.5px solid #EFE3D0',borderRadius:12,cursor:'grab',userSelect:'none'}}>
                 <div style={b.chipStyle}>{b.glyph}</div>
                 <div style={{display:'flex',flexDirection:'column',lineHeight:1.2,minWidth:0}}>
                   <span style={{font:"800 13px 'Nunito',sans-serif",color:'#43382E'}}>{b.label}</span>
@@ -1212,7 +1263,7 @@ export default class Flowground extends React.Component {
                 </div>
               </div>
             ))}
-            <div style={{marginTop:'auto',padding:10,background:'#FBF4E7',borderRadius:12,font:"600 11.5px/1.5 'Nunito',sans-serif",color:'#A5947C'}}>Drag from the dot under a block to another block to draw an arrow.</div>
+            <div style={{marginTop:'auto',padding:10,background:'#FBF4E7',borderRadius:12,font:"600 11.5px/1.5 'Nunito',sans-serif",color:'#A5947C'}}>{v.dragArrowHintText}</div>
           </div>
 
           <div style={{position:'relative',minWidth:0,minHeight:0}} data-screen-label="Canvas">
@@ -1227,7 +1278,7 @@ export default class Flowground extends React.Component {
                         <div style={n.headerStyle}>
                           <div style={n.chipStyle}>{n.glyph}</div>
                           <span style={{font:"800 12px 'Nunito',sans-serif",color:'#43382E',whiteSpace:'nowrap',flex:1}}>{n.title}</span>
-                          <span onMouseDown={(e) => e.stopPropagation()} onClick={n.onOpen} title="Open subgraph" style={{cursor:'pointer',color:'#A08F79',font:"800 13px 'Nunito',sans-serif",padding:'0 2px'}}>⤢</span>
+                          <span onMouseDown={(e) => e.stopPropagation()} onClick={n.onOpen} title={v.openSubgraphTooltip} style={{cursor:'pointer',color:'#A08F79',font:"800 13px 'Nunito',sans-serif",padding:'0 2px'}}>⤢</span>
                         </div>
                         <svg width={n.mini.width} height={n.mini.height} style={{position:'absolute',left:0,top:0,pointerEvents:'none',overflow:'visible'}}>
                           {n.mini.edges.map((e) => (
@@ -1270,7 +1321,7 @@ export default class Flowground extends React.Component {
                     <div style={n.portRowStyle}>
                       {n.ports.map((p, i) => (
                         <div key={i} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
-                          <div onMouseDown={p.onMouseDown} title="Drag to connect" style={p.dotStyle}></div>
+                          <div onMouseDown={p.onMouseDown} title={v.dragToConnectTitle} style={p.dotStyle}></div>
                           {p.label ? (
                             <span style={p.labelStyle}>{p.label}</span>
                           ) : null}
@@ -1284,7 +1335,7 @@ export default class Flowground extends React.Component {
 
             {v.pathTrail.length > 0 ? (
               <div data-screen-label="Subgraph breadcrumb" style={{position:'absolute',left:14,top:14,zIndex:6,display:'flex',alignItems:'center',gap:6,background:'#FFFDF8',border:'1.5px solid #E7D9C4',borderRadius:11,padding:'7px 12px',boxShadow:'0 6px 16px rgba(90,60,30,.14)',font:"800 12px 'Nunito',sans-serif"}}>
-                <span onClick={v.onCrumbHome} style={{cursor:'pointer',color:'#5F5346'}}>⌂ Main flow</span>
+                <span onClick={v.onCrumbHome} style={{cursor:'pointer',color:'#5F5346'}}>{v.mainFlowLabel}</span>
                 {v.pathTrail.map((c, i) => (
                   <React.Fragment key={c.id}>
                     <span style={{color:'#C9B99F'}}>▸</span>
@@ -1320,18 +1371,18 @@ export default class Flowground extends React.Component {
                   <div style={{font:"600 11px/1.5 'Nunito',sans-serif",color:'#A5947C',background:'#FBF4E7',borderRadius:10,padding:'8px 10px'}}>{v.inspHint}</div>
                 ) : null}
                 {v.inspIsSubgraph ? (
-                  <button onClick={v.onOpenSubgraph} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:10,padding:7,font:"800 12px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Open subgraph ▸</button>
+                  <button onClick={v.onOpenSubgraph} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:10,padding:7,font:"800 12px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>{v.openSubgraphBtnLabel}</button>
                 ) : null}
-                <button onClick={v.onDeleteNode} style={{background:'#FFF6F2',border:'1.5px solid #EFC7B8',borderRadius:10,padding:7,font:"800 12px 'Nunito',sans-serif",color:'#C4553B',cursor:'pointer'}}>Remove block</button>
+                <button onClick={v.onDeleteNode} style={{background:'#FFF6F2',border:'1.5px solid #EFC7B8',borderRadius:10,padding:7,font:"800 12px 'Nunito',sans-serif",color:'#C4553B',cursor:'pointer'}}>{v.removeBlockLabel}</button>
               </div>
             ) : null}
           </div>
 
           <div data-screen-label="Run panel" style={{background:'#FFFDF8',borderLeft:'1.5px solid #EADCC8',display:'grid',gridTemplateRows:'auto minmax(0,1fr)',minHeight:0}}>
             <div style={{padding:'14px 14px 12px',borderBottom:'1.5px solid #F0E4D2',display:'flex',flexDirection:'column',gap:9}}>
-              <div style={{font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79'}}>Variables</div>
+              <div style={{font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79'}}>{v.variablesLabel}</div>
               {v.varsEmpty ? (
-                <div style={{font:"600 12px 'Nunito',sans-serif",color:'#C0B09A'}}>Nothing remembered yet — run the flow.</div>
+                <div style={{font:"600 12px 'Nunito',sans-serif",color:'#C0B09A'}}>{v.varsEmptyText}</div>
               ) : null}
               <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
                 {v.varsList.map((vr) => (
@@ -1342,10 +1393,10 @@ export default class Flowground extends React.Component {
               </div>
             </div>
             <div style={{display:'grid',gridTemplateRows:'auto minmax(0,1fr)',minHeight:0}}>
-              <div style={{padding:'12px 14px 8px',font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79'}}>Console</div>
+              <div style={{padding:'12px 14px 8px',font:"800 11px 'Nunito',sans-serif",letterSpacing:'.12em',textTransform:'uppercase',color:'#A08F79'}}>{v.consoleLabel}</div>
               <div ref={v.consoleRef} style={{overflowY:'auto',padding:'0 14px 14px',display:'flex',flexDirection:'column'}}>
                 {v.consoleEmpty ? (
-                  <div style={{font:"600 12px/1.6 'Nunito',sans-serif",color:'#C0B09A'}}>Press Run and watch your flow think out loud.</div>
+                  <div style={{font:"600 12px/1.6 'Nunito',sans-serif",color:'#C0B09A'}}>{v.consoleEmptyText}</div>
                 ) : null}
                 {v.consoleLines.map((l, i) => (
                   <div key={i} style={l.style}><span style={l.glyphStyle}>{l.glyph}</span><span style={{minWidth:0}}>{l.text}</span></div>
@@ -1366,7 +1417,7 @@ export default class Flowground extends React.Component {
           <div style={{position:'fixed',bottom:26,left:'50%',transform:'translateX(-50%)',zIndex:60,display:'flex',alignItems:'center',gap:11,background:'#43382E',borderRadius:14,padding:'11px 16px',boxShadow:'0 14px 34px rgba(50,30,10,.35)',animation:'toastin .3s ease-out'}}>
             <div style={{width:30,height:30,borderRadius:'50%',background:'#F2B63C',display:'grid',placeItems:'center',color:'#7A5A12',fontSize:14}}>★</div>
             <div style={{display:'flex',flexDirection:'column',lineHeight:1.25}}>
-              <span style={{font:"700 10.5px 'Nunito',sans-serif",letterSpacing:'.1em',textTransform:'uppercase',color:'#C9B99F'}}>Achievement unlocked</span>
+              <span style={{font:"700 10.5px 'Nunito',sans-serif",letterSpacing:'.1em',textTransform:'uppercase',color:'#C9B99F'}}>{v.toastAchLabel}</span>
               <span style={{font:"800 13.5px 'Nunito',sans-serif",color:'#FFFDF8'}}>{v.toastTitle} — {v.toastDesc}</span>
             </div>
           </div>
@@ -1377,7 +1428,7 @@ export default class Flowground extends React.Component {
             <div onClick={v.onExportClose} style={{position:'fixed',inset:0,background:'rgba(52,36,22,.42)',zIndex:55,animation:'fadein .2s'}}></div>
             <div data-screen-label="Export JSON" style={{position:'fixed',left:'50%',top:'50%',transform:'translate(-50%,-50%)',width:520,maxWidth:'90vw',background:'#FFFDF8',borderRadius:18,padding:18,zIndex:56,boxShadow:'0 24px 60px rgba(50,30,10,.4)',display:'flex',flexDirection:'column',gap:10,animation:'fadein .2s'}}>
               <div style={{display:'flex',alignItems:'center',gap:8}}>
-                <div style={{font:"900 16px 'Nunito',sans-serif",color:'#43382E',flex:1}}>Export flow as JSON</div>
+                <div style={{font:"900 16px 'Nunito',sans-serif",color:'#43382E',flex:1}}>{v.exportFlowTitle}</div>
                 <button onClick={v.onExportClose} style={{background:'none',border:'none',font:"800 15px 'Nunito',sans-serif",color:'#A08F79',cursor:'pointer',padding:'4px 8px'}}>✕</button>
               </div>
               <div style={{display:'flex',background:'#F1E7D6',borderRadius:11,padding:3,gap:2,alignSelf:'flex-start'}}>
@@ -1389,7 +1440,7 @@ export default class Flowground extends React.Component {
               <textarea readOnly value={v.exportJson} style={{width:'100%',boxSizing:'border-box',height:260,resize:'vertical',border:'1.5px solid #E7D9C4',borderRadius:12,padding:10,font:'600 11.5px/1.5 ui-monospace,Menlo,monospace',color:'#43382E',background:'#FBF6ED'}}></textarea>
               <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
                 <button onClick={v.onExportCopy} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'8px 16px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer',minWidth:88}}>{v.copyLabel}</button>
-                <button onClick={v.onExportDownload} style={v.runBtnStyle}>Download .json</button>
+                <button onClick={v.onExportDownload} style={v.runBtnStyle}>{v.downloadJSONLabel}</button>
               </div>
             </div>
           </React.Fragment>
@@ -1400,27 +1451,27 @@ export default class Flowground extends React.Component {
             <div onClick={v.onCloseLLM} style={{position:'fixed',inset:0,background:'rgba(52,36,22,.42)',zIndex:55,animation:'fadein .2s'}}></div>
             <div data-screen-label="AI settings" style={{position:'fixed',left:'50%',top:'50%',transform:'translate(-50%,-50%)',width:420,maxWidth:'90vw',background:'#FFFDF8',borderRadius:18,padding:18,zIndex:56,boxShadow:'0 24px 60px rgba(50,30,10,.4)',display:'flex',flexDirection:'column',gap:10,animation:'fadein .2s'}}>
               <div style={{display:'flex',alignItems:'center',gap:8}}>
-                <div style={{font:"900 16px 'Nunito',sans-serif",color:'#43382E',flex:1}}>AI settings</div>
+                <div style={{font:"900 16px 'Nunito',sans-serif",color:'#43382E',flex:1}}>{v.aiSettingsLabel}</div>
                 <button onClick={v.onCloseLLM} style={{background:'none',border:'none',font:"800 15px 'Nunito',sans-serif",color:'#A08F79',cursor:'pointer',padding:'4px 8px'}}>✕</button>
               </div>
-              <div style={{font:"600 12px/1.55 'Nunito',sans-serif",color:'#A5947C'}}>Powers AI Generate / AI Judge blocks. Kept only in this browser (never in Export JSON) and sent straight to the endpoint below when you Run.</div>
+              <div style={{font:"600 12px/1.55 'Nunito',sans-serif",color:'#A5947C'}}>{v.aiSettingsDescText}</div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Compat mode</label>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>{v.compatModeLabel}</label>
                 <select value={v.llmMode} onChange={v.onLLMModeChange} style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}}>
-                  <option value="anthropic">Anthropic (/v1/messages)</option>
-                  <option value="openai">OpenAI-compatible (/chat/completions)</option>
+                  <option value="anthropic">{v.modeAnthropicLabel}</option>
+                  <option value="openai">{v.modeOpenAILabel}</option>
                 </select>
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Base URL</label>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>{v.baseURLLabel}</label>
                 <input value={v.llmBaseUrl} onChange={v.onLLMBaseUrlChange} spellCheck={false} placeholder="https://api.anthropic.com" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>API key</label>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>{v.apiKeyLabel}</label>
                 <input value={v.llmApiKey} onChange={v.onLLMApiKeyChange} type="password" autoComplete="off" spellCheck={false} placeholder="sk-…" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Model</label>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>{v.modelLabel}</label>
                 <input value={v.llmModel} onChange={v.onLLMModelChange} spellCheck={false} placeholder="claude-3-5-haiku-20241022" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
               </div>
             </div>
@@ -1437,7 +1488,7 @@ export default class Flowground extends React.Component {
               <div style={{display:'flex',alignItems:'center',gap:5,marginTop:6}}>
                 {v.tutDots.map((d, i) => (<div key={i} style={d.style}></div>))}
                 <div style={{flex:1}}></div>
-                <button onClick={v.onTutSkip} style={{background:'none',border:'none',font:"800 12.5px 'Nunito',sans-serif",color:'#A08F79',cursor:'pointer',padding:'8px 10px'}}>Skip</button>
+                <button onClick={v.onTutSkip} style={{background:'none',border:'none',font:"800 12.5px 'Nunito',sans-serif",color:'#A08F79',cursor:'pointer',padding:'8px 10px'}}>{v.tutSkipLabel}</button>
                 <button onClick={v.onTutNext} style={v.tutNextStyle}>{v.tutNextLabel}</button>
               </div>
             </div>
