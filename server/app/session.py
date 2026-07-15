@@ -71,7 +71,8 @@ class Run:
     """One execution of one flow. Also serves as the handlers' run context."""
 
     def __init__(self, session: "Session", compiled: CompiledFlow,
-                 mode: str, speed: int, run_id: Optional[str] = None):
+                 mode: str, speed: int, run_id: Optional[str] = None,
+                 llm: Optional[Dict[str, str]] = None):
         self.session = session
         self.compiled = compiled
         self.mode = mode
@@ -83,6 +84,11 @@ class Run:
         self.vars: Dict[str, Any] = {}
         self.loop_counts: Dict[str, int] = {}
         self.steps = 0
+        #: global AI settings (apiKey/baseUrl/mode/model) for llm_generate/
+        #: llm_judge blocks — a sibling of "flow" on the start message, NEVER
+        #: part of the flow itself, so an exported/pasted flow never carries
+        #: a plaintext key (PROTOCOL.md "llm" field).
+        self.llm: Dict[str, str] = llm or {}
 
         self.credits = asyncio.Semaphore(0)
         #: the most recently recorded report — only used by the "engine
@@ -372,9 +378,10 @@ class Session:
         except FlowValidationError as exc:
             self.error(" ".join(exc.errors))
             return
+        llm = _parse_llm_settings(message.get("llm"))
 
         self.reset()  # start while a run is active = implicit reset
-        run = Run(self, compiled, mode, speed, run_id)
+        run = Run(self, compiled, mode, speed, run_id, llm)
         self.run = run
         self.send({
             "type": "started",
@@ -398,3 +405,19 @@ def _parse_speed(value: Any) -> Optional[int]:
     if isinstance(value, int) and 0 <= value < len(SPEEDS):
         return value
     return None
+
+
+#: keys the compiled llm_generate/llm_judge handlers actually read
+#: (server/app/compiler.py's ``_call_llm_or_block_error``).
+_LLM_SETTING_KEYS = ("apiKey", "baseUrl", "mode", "model")
+
+
+def _parse_llm_settings(value: Any) -> Dict[str, str]:
+    """Best-effort read of the optional "llm" field: malformed input is
+    silently dropped to {} rather than failing the whole start — these
+    blocks only fail (with a friendly per-node message) if a flow actually
+    uses one and the settings turn out to be missing/wrong."""
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items()
+           if k in _LLM_SETTING_KEYS and isinstance(v, str)}

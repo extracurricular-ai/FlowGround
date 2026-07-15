@@ -26,6 +26,7 @@ from loopgraph.core.graph import Node as LGNode
 from loopgraph.core.types import NodeKind
 from loopgraph.registry.function_registry import FunctionRegistry
 
+from .llm_client import LLMError, call_llm
 from .safe_eval import (EmptyExprError, ExprError, coerce, eval_expr, fmt,
                         interp, js_number, js_truthy)
 from .schema import (BLOCKS, NESTED_GRAPH_BLOCKS, Flow, FlowEdge, FlowNode,
@@ -292,10 +293,34 @@ def _eval_or_block_error(expr: str, variables: Dict[str, Any]) -> Any:
         ) from None
 
 
-def _execute_block(node: FlowNode, ctx: Any,
-                   logs: List[Tuple[str, str]]) -> Optional[str]:
+def _ellipsize(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+async def _call_llm_or_block_error(ctx: Any, prompt: str) -> str:
+    """Call the LLM using the run's global AI settings (``ctx.llm`` — set
+    from the start message's "llm" field, never part of the flow itself).
+    Wraps :class:`LLMError` as a :class:`BlockError` so it surfaces through
+    the same "Stuck on the {Label} block: …" narration as any other block
+    failure, rather than crashing the run differently."""
+    llm = getattr(ctx, "llm", None) or {}
+    try:
+        return await call_llm(
+            mode=llm.get("mode", "anthropic"),
+            base_url=llm.get("baseUrl", ""),
+            api_key=llm.get("apiKey", ""),
+            model=llm.get("model", ""),
+            prompt=prompt,
+        )
+    except LLMError as exc:
+        raise BlockError(str(exc)) from None
+
+
+async def _execute_block(node: FlowNode, ctx: Any,
+                         logs: List[Tuple[str, str]]) -> Optional[str]:
     """Run one block's semantics; returns the chosen out-port (None for end).
-    May raise :class:`BlockError`."""
+    May raise :class:`BlockError`. ``async`` solely so llm_generate/llm_judge
+    can ``await`` their HTTP call — every other block below is synchronous."""
     cfg = node.config
     block = node.block
 
@@ -366,6 +391,23 @@ def _execute_block(node: FlowNode, ctx: Any,
         logs.append(("step", f"{result_name} = {fn_name}({fmt(a)}) → {fmt(r)}"))
         return "out"
 
+    if block == "llm_generate":
+        prompt = interp(cfg.get("prompt", ""), ctx.vars)
+        result_name = cfg.get("result", "")
+        text = await _call_llm_or_block_error(ctx, prompt)
+        ctx.vars[result_name] = text
+        logs.append(("step", f"{result_name} = AI(\"{_ellipsize(prompt)}\") "
+                             f"→ {fmt(_ellipsize(text))}"))
+        return "out"
+
+    if block == "llm_judge":
+        prompt = interp(cfg.get("prompt", ""), ctx.vars)
+        text = await _call_llm_or_block_error(ctx, prompt)
+        r = text.strip().lower().startswith(("y", "true"))
+        logs.append(("branch", f"AI: {_ellipsize(prompt)}  → "
+                               + ("yes" if r else "no")))
+        return "true" if r else "false"
+
     if block == "split":
         logs.append(("step", "Split — running both branches"))
         return None  # fan-out: activated edges are structural, not port-driven
@@ -400,7 +442,7 @@ def _make_handler(compiled: CompiledFlow, node: FlowNode, ctx: Any):
         port: Optional[str] = None
         halt: Optional[str] = None
         try:
-            port = _execute_block(node, ctx, logs)
+            port = await _execute_block(node, ctx, logs)
         except BlockError as exc:
             logs.append(("err", f"Stuck on the {label} block: {exc}"))
             halt = "error"

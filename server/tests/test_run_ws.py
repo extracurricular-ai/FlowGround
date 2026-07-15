@@ -22,9 +22,12 @@ def receive_strict_json(ws):
         parse_constant=lambda c: pytest.fail(f"non-strict JSON constant: {c}"))
 
 
-def step_run(ws, flow, max_steps=200):
+def step_run(ws, flow, max_steps=200, llm=None):
     """start(mode step) + one step per node until finished/error."""
-    ws.send_json({"type": "start", "flow": flow, "mode": "step", "speed": 1})
+    message = {"type": "start", "flow": flow, "mode": "step", "speed": 1}
+    if llm is not None:
+        message["llm"] = llm
+    ws.send_json(message)
     started = ws.receive_json()
     assert started["type"] == "started", started
     events = []

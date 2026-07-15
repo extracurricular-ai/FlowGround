@@ -42,8 +42,8 @@ it is NEVER sent to the server (client-supplied code = RCE).
 }
 ```
 
-- `kind`: `TASK` (start/ask/say/set/fn/split), `SWITCH` (iff/loop), `TERMINAL` (end),
-  `AGGREGATE` (merge), `SUBGRAPH` (subgraph).
+- `kind`: `TASK` (start/ask/say/set/fn/split/llm_generate), `SWITCH` (iff/loop/llm_judge),
+  `TERMINAL` (end), `AGGREGATE` (merge), `SUBGRAPH` (subgraph).
   Server re-derives and validates kind from `block`; mismatch → validation error.
 - `position` is editor-only; server ignores it.
 - Block configs (all values are strings, straight from the inspector):
@@ -59,7 +59,14 @@ it is NEVER sent to the server (client-supplied code = RCE).
   | split | `{}` | `a`, `b` (both fire — a real LoopGraph fan-out) |
   | merge | `{}` | `out` (fires once all incoming branches complete) |
   | subgraph | `{graph: "<JSON-encoded nested flowground.v1 flow>"}` | `out` |
+  | llm_generate | `{prompt, result}` | `out` (calls the configured LLM, saves its text reply into `vars[result]`) |
+  | llm_judge | `{prompt}` | `true`, `false` (calls the LLM, routes true iff its reply starts with "y"/"yes"/"true") |
   | end   | `{}` | none |
+
+  `prompt` supports the same `{word}` interpolation as `say`'s `text`. Neither `llm_generate`
+  nor `llm_judge` carries any API key/URL/model in its own config — those live in the
+  separate top-level `llm` field on the `start` message (below), never in the flow itself, so
+  an exported/copied/pasted flow never contains a plaintext key.
 
 ### Fan-out and merge ticks
 
@@ -120,7 +127,9 @@ Server cancels the active run when the socket closes.
 ### Client → server
 
 ```json
-{"type": "start", "flow": {…flowground.v1…}, "mode": "run", "speed": 1, "runId": "r3"}
+{"type": "start", "flow": {…flowground.v1…}, "mode": "run", "speed": 1, "runId": "r3",
+ "llm": {"apiKey": "sk-…", "baseUrl": "https://api.anthropic.com",
+         "mode": "anthropic", "model": "claude-3-5-haiku-20241022"}}
 {"type": "step"}                 // in step mode: execute exactly one node
 {"type": "pause"}
 {"type": "resume"}
@@ -128,6 +137,14 @@ Server cancels the active run when the socket closes.
 {"type": "reset"}                // cancel active run; session stays usable
 ```
 
+- `llm` (optional): global AI settings for any `llm_generate`/`llm_judge` blocks in the flow —
+  `apiKey`, `baseUrl`, `mode` (`"anthropic"` or `"openai"` — picks the request/response shape;
+  `"openai"` also covers most OpenAI-compatible endpoints), `model`. A sibling of `flow`, not
+  a part of it: the frontend keeps this in its own local-only AI-settings panel (never in
+  `buildFlow()`/Export JSON), and the server never echoes it back on any event. Malformed or
+  missing `llm` doesn't fail the `start` — it's dropped to `{}`, and only a flow that actually
+  uses an `llm_*` block then fails, per-node, when it tries to call out with nothing
+  configured (same "Stuck on the {Label} block: …" narration as any other block error).
 - The session has one boolean: `auto`. `start(mode:"run")` → auto on (server ticks every
   `SPEEDS[speed]` ms); `start(mode:"step")` → auto off. `pause` → auto off. `resume` →
   auto on. `step` → auto off AND execute exactly one node (valid in either mode — it

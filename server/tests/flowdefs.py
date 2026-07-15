@@ -6,6 +6,7 @@ KIND_OF = {
     "start": "TASK", "ask": "TASK", "say": "TASK", "set": "TASK",
     "iff": "SWITCH", "loop": "SWITCH", "fn": "TASK", "end": "TERMINAL",
     "split": "TASK", "merge": "AGGREGATE", "subgraph": "SUBGRAPH",
+    "llm_generate": "TASK", "llm_judge": "SWITCH",
 }
 
 
@@ -101,6 +102,27 @@ def fn_flow():
         edge("e4", "n4", "out", "n5"),
         edge("e5", "n5", "out", "n6"),
         edge("e6", "n6", "out", "n7"),
+    ])
+
+
+def llm_flow(judge_cond_true=True):
+    """start -> AI Generate (saves to "reply") -> AI Judge -> end/end."""
+    return flow("n1", [
+        node("n1", "start"),
+        node("n2", "set", {"name": "topic", "expr": "ducks"}),
+        node("n3", "llm_generate", {"prompt": "Say hi about {topic}.", "result": "reply"}),
+        node("n4", "llm_judge", {"prompt": "Was that about {topic}?"}),
+        node("n5", "say", {"text": "yes branch: {reply}"}),
+        node("n6", "say", {"text": "no branch: {reply}"}),
+        node("n7", "end"),
+    ], [
+        edge("e1", "n1", "out", "n2"),
+        edge("e2", "n2", "out", "n3"),
+        edge("e3", "n3", "out", "n4"),
+        edge("e4", "n4", "true", "n5"),
+        edge("e5", "n4", "false", "n6"),
+        edge("e6", "n5", "out", "n7"),
+        edge("e7", "n6", "out", "n7"),
     ])
 
 

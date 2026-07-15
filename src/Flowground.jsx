@@ -27,11 +27,13 @@ export default class Flowground extends React.Component {
       split: { label: 'Split', color: '#3B8EA5', glyph: '⑂', desc: 'Run two branches at once' },
       merge: { label: 'Merge', color: '#5B7F3B', glyph: '⑃', desc: 'Wait for every branch, then continue' },
       subgraph: { label: 'Subgraph', color: '#9A6B3F', glyph: '▣', desc: 'A whole mini-flow, packed into one block' },
+      llm_generate: { label: 'AI Generate', color: '#6B5FA6', glyph: '✦', desc: 'Ask an LLM to write something' },
+      llm_judge:    { label: 'AI Judge',    color: '#9169A8', glyph: '✧', desc: 'Let an LLM decide yes or no' },
       end:   { label: 'End',   color: '#8B8178', glyph: '■', desc: 'Finish the flow' }
     };
-    this.ORDER = ['start','ask','say','set','iff','loop','fn','split','merge','subgraph','end'];
+    this.ORDER = ['start','ask','say','set','iff','loop','fn','llm_generate','llm_judge','split','merge','subgraph','end'];
     // block -> required LoopGraph kind (PROTOCOL.md block table).
-    this.KIND_OF = {iff:'SWITCH', loop:'SWITCH', end:'TERMINAL', merge:'AGGREGATE', subgraph:'SUBGRAPH'};
+    this.KIND_OF = {iff:'SWITCH', loop:'SWITCH', end:'TERMINAL', merge:'AGGREGATE', subgraph:'SUBGRAPH', llm_judge:'SWITCH'};
     // Header-bar height above a subgraph's collapsed mini-content (the "▣
     // Subgraph ⤢" row) — shared by boxSizeFor (the block's own border) and
     // buildMini (the content it draws inside), so the two never disagree.
@@ -55,6 +57,12 @@ export default class Flowground extends React.Component {
     let ach = {}; let tutDone = false;
     try { ach = JSON.parse(localStorage.getItem('flowground.ach') || '{}') || {}; } catch (e) {}
     try { tutDone = localStorage.getItem('flowground.tut') === '1'; } catch (e) {}
+    // Global AI settings for AI Generate/AI Judge blocks — kept ONLY in
+    // localStorage + sent as the "llm" field alongside (never inside) the
+    // flow on run-start, so it's never in Export JSON (mirrors
+    // computer.tldraw.com's single bring-your-own-key settings panel).
+    let llm = {apiKey:'', baseUrl:'https://api.anthropic.com', mode:'anthropic', model:'claude-3-5-haiku-20241022'};
+    try { llm = Object.assign({}, llm, JSON.parse(localStorage.getItem('flowground.llm') || '{}')); } catch (e) {}
 
     this.state = {
       // Parallel run -> merge -> loop whose body is a subgraph node that is
@@ -102,7 +110,8 @@ export default class Flowground extends React.Component {
       selNode: null, selEdge: null, ghost: null, pend: null, path: [],
       running: false, paused: false, curId: null, activeEdges: {},
       vars: {}, steps: 0, console: [],
-      speedIx: 1, ach: ach, toast: null, tut: tutDone ? -1 : 0, exportOn: false, exportFmt: 'lg', copied: false
+      speedIx: 1, ach: ach, toast: null, tut: tutDone ? -1 : 0, exportOn: false, exportFmt: 'lg', copied: false,
+      llm: llm, llmOn: false
     };
   }
 
@@ -159,6 +168,7 @@ export default class Flowground extends React.Component {
   portsOf(type) {
     if (type === 'iff')   return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
     if (type === 'loop')  return [{port:'repeat',label:'again',color:'#B65C3F'},{port:'done',label:'done',color:'#8B8178'}];
+    if (type === 'llm_judge') return [{port:'true',label:'yes',color:'#6E9A72'},{port:'false',label:'no',color:'#C4553B'}];
     if (type === 'split') return [{port:'a',label:'A',color:'#3B8EA5'},{port:'b',label:'B',color:'#2E6E80'}];
     if (type === 'end')   return [];
     return [{port:'out',label:'',color:this.TYPES[type].color}];
@@ -296,6 +306,8 @@ export default class Flowground extends React.Component {
     // one canvas collide (PROTOCOL.md: ids unique across all nesting).
     const d = {ask:{name:'age', value:'12'}, say:{text:'Hello, {name}!'}, set:{name:'count', expr:'1'},
                iff:{cond:'count > 3'}, loop:{mode:'count', times:'3', cond:'count < 4'}, fn:{fn:'double', arg:'count', result:'count'},
+               llm_generate:{prompt:'Write one short, upbeat sentence about {name}.', result:'aiText'},
+               llm_judge:{prompt:'Does this sound like a happy name: {name}?'},
                subgraph:{graph: this.defaultInnerLoopGraph(id)}}[type] || {};
     const cnt = this.curGraph().nodes.length;
     const nx = x != null ? x : 640 + ((cnt * 40) % 180);
@@ -430,7 +442,10 @@ export default class Flowground extends React.Component {
       // silently revive a run the user just cancelled (send() on an opening
       // socket returns false, so the earlier Reset never reached the server).
       if (gen !== self._runGen) return;
-      rc.send({type:'start', flow:self.buildFlow(), mode:mode, speed:self.state.speedIx, runId:'r' + gen});
+      // llm is a sibling of flow, never folded into buildFlow()/Export JSON —
+      // it's the run's own bring-your-own-key settings, not part of the
+      // shareable graph (PROTOCOL.md "llm" field).
+      rc.send({type:'start', flow:self.buildFlow(), mode:mode, speed:self.state.speedIx, runId:'r' + gen, llm:self.state.llm});
       if (mode === 'step') rc.send({type:'step'});
     }, function(){
       if (self._pendingStart === gen) self._pendingStart = null;
@@ -559,6 +574,52 @@ export default class Flowground extends React.Component {
     try { localStorage.setItem('flowground.tut', '1'); } catch (e) {}
     this.setState({tut:-1});
     if (complete) this.unlock('tutorial');
+  }
+
+  // ---------- AI settings (localStorage only — never sent to Export JSON) ----------
+  saveLLM(patch) {
+    this.setState(function(s){
+      const llm = Object.assign({}, s.llm, patch);
+      try { localStorage.setItem('flowground.llm', JSON.stringify(llm)); } catch (e) {}
+      return {llm: llm};
+    });
+  }
+
+  // Replaces the whole canvas with a small demo exercising AI Generate +
+  // AI Judge end to end — a quick way to try the AI settings you just
+  // configured without hand-wiring blocks first. Reloading the page brings
+  // back the original starter flow (nothing here is persisted).
+  loadLLMExample() {
+    // Same run-cancelling safety as Reset — swapping the graph out from
+    // under an in-flight run would otherwise leave stale ticks/edges lit.
+    this._runGen++;
+    this._pendingStart = null;
+    if (this._rc) this._rc.send({type:'reset'});
+    this.setState({
+      nodes: [
+        {id:'n1', type:'start',        x:360, y:40,  data:{}},
+        {id:'n2', type:'ask',          x:360, y:150, data:{name:'topic', value:'the ocean'}},
+        {id:'n3', type:'llm_generate', x:360, y:260, data:{prompt:'Write one short, vivid sentence about {topic}.', result:'line'}},
+        {id:'n4', type:'say',          x:360, y:370, data:{text:'AI wrote: {line}'}},
+        {id:'n5', type:'llm_judge',    x:360, y:480, data:{prompt:'Is this sentence upbeat in tone: {line}'}},
+        {id:'n6', type:'say',          x:120, y:590, data:{text:'Nice, that’s upbeat!'}},
+        {id:'n7', type:'say',          x:600, y:590, data:{text:'Hmm, kind of neutral or negative.'}},
+        {id:'n8', type:'end',          x:360, y:700, data:{}}
+      ],
+      edges: [
+        {id:'e1', from:{node:'n1',port:'out'},   to:'n2'},
+        {id:'e2', from:{node:'n2',port:'out'},   to:'n3'},
+        {id:'e3', from:{node:'n3',port:'out'},   to:'n4'},
+        {id:'e4', from:{node:'n4',port:'out'},   to:'n5'},
+        {id:'e5', from:{node:'n5',port:'true'},  to:'n6'},
+        {id:'e6', from:{node:'n5',port:'false'}, to:'n7'},
+        {id:'e7', from:{node:'n6',port:'out'},   to:'n8'},
+        {id:'e8', from:{node:'n7',port:'out'},   to:'n8'}
+      ],
+      path: [], selNode: null, selEdge: null, ghost: null, pend: null,
+      running: false, paused: false, curId: null, activeEdges: {},
+      vars: {}, steps: 0, console: []
+    });
   }
 
   // ---------- export ----------
@@ -776,6 +837,8 @@ export default class Flowground extends React.Component {
         case 'iff':  return d.cond + ' ?';
         case 'loop': return (d.mode === 'while') ? 'while ' + d.cond : d.times + '× around';
         case 'fn':   return d.result + ' = ' + d.fn + '(' + d.arg + ')';
+        case 'llm_generate': return d.result + ' = AI("' + d.prompt + '")';
+        case 'llm_judge':    return 'AI: ' + d.prompt + ' ?';
         case 'start':return 'entry point';
         case 'split':return 'run both branches';
         case 'merge':return 'wait for both, then continue';
@@ -894,6 +957,9 @@ export default class Flowground extends React.Component {
       const selectField = function(key, label, options) {
         const f = field(key, label); f.isText = false; f.isSelect = true; f.options = options; return f;
       };
+      const textareaField = function(key, label) {
+        const f = field(key, label); f.isText = false; f.isTextarea = true; return f;
+      };
       switch (selN.type) {
         case 'ask': inspFields = [field('name', 'Save answer as'), field('value', 'Sample answer')];
           inspHint = 'In a real app the user types the answer — here you choose it in advance.'; break;
@@ -918,6 +984,10 @@ export default class Flowground extends React.Component {
           break; }
         case 'fn': inspFields = [selectField('fn', 'Mini-machine', ['double', 'square', 'shout']), field('arg', 'Give it'), field('result', 'Save result as')];
           inspHint = 'double ×2 · square x·x · shout MAKES IT LOUD'; break;
+        case 'llm_generate': inspFields = [textareaField('prompt', 'Prompt'), field('result', 'Save reply as')];
+          inspHint = 'Wrap a variable in {curly braces}. Uses your AI settings (⚙ in the header) — add an API key there first.'; break;
+        case 'llm_judge': inspFields = [textareaField('prompt', 'Question to ask the AI')];
+          inspHint = 'A yes/no question — wrap a variable in {curly braces}. A reply starting with "yes" routes yes, anything else routes no. Uses your AI settings (⚙ in the header).'; break;
         case 'start': inspHint = 'Every flow begins here. There is nothing to set.'; break;
         case 'split': inspHint = 'Both of its arrows fire at once — LoopGraph runs branch A and branch B, one after the other, before anything downstream of both can continue.'; break;
         case 'merge': inspHint = 'Waits for every branch that arrows into it to finish, then continues once — wire both branches of a Split here to join them back up.'; break;
@@ -1038,6 +1108,26 @@ export default class Flowground extends React.Component {
       onExportDownload: function(){ self.downloadExport(); },
       copyLabel: st.copied ? 'Copied!' : 'Copy',
 
+      llmOn: st.llmOn,
+      onOpenLLM: function(){ self.setState({llmOn:true}); },
+      onCloseLLM: function(){ self.setState({llmOn:false}); },
+      onLoadLLMExample: function(){ self.loadLLMExample(); },
+      llmApiKey: st.llm.apiKey, llmBaseUrl: st.llm.baseUrl, llmModel: st.llm.model, llmMode: st.llm.mode,
+      onLLMApiKeyChange: function(ev){ self.saveLLM({apiKey: ev.target.value}); },
+      onLLMBaseUrlChange: function(ev){ self.saveLLM({baseUrl: ev.target.value}); },
+      onLLMModelChange: function(ev){ self.saveLLM({model: ev.target.value}); },
+      onLLMModeChange: function(ev){
+        const v = ev.target.value;
+        const DEFAULTS = {anthropic:{baseUrl:'https://api.anthropic.com', model:'claude-3-5-haiku-20241022'},
+                          openai:{baseUrl:'https://api.openai.com/v1', model:'gpt-4o-mini'}};
+        const cur = st.llm, otherDef = DEFAULTS[cur.mode] || {}, patch = {mode:v};
+        // Only auto-fill baseUrl/model if the user never customized them away
+        // from the OTHER mode's default — never clobber a deliberate value.
+        if (!cur.baseUrl || cur.baseUrl === otherDef.baseUrl) patch.baseUrl = DEFAULTS[v].baseUrl;
+        if (!cur.model || cur.model === otherDef.model) patch.model = DEFAULTS[v].model;
+        self.saveLLM(patch);
+      },
+
       varsList: varsList, varsEmpty: varsList.length === 0,
       consoleLines: consoleLines, consoleEmpty: consoleLines.length === 0,
 
@@ -1092,7 +1182,8 @@ export default class Flowground extends React.Component {
           </div>
           <div style={{flex:1}}></div>
           <div style={{display:'flex',gap:6,alignItems:'center'}} data-screen-label="Achievements">
-            <button onClick={v.onExport} title="Export this flow as JSON" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer',marginRight:6}}>Export JSON</button>
+            <button onClick={v.onExport} title="Export this flow as JSON" style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'7px 14px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer'}}>Export JSON</button>
+            <button onClick={v.onOpenLLM} title="AI settings — API key, base URL, compat mode" style={{width:34,height:34,marginRight:6,borderRadius:11,border:'1.5px solid #E4D5BF',background:'#FFFDF8',color:'#5F5346',font:"800 15px 'Nunito',sans-serif",cursor:'pointer'}}>⚙</button>
             {v.achs.map((a, i) => (
               <div key={i} title={a.title} style={a.style}>★</div>
             ))}
@@ -1212,6 +1303,9 @@ export default class Flowground extends React.Component {
                     {f.isText ? (
                       <input value={f.value} onChange={f.onChange} spellCheck={false} style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF',minWidth:0}} />
                     ) : null}
+                    {f.isTextarea ? (
+                      <textarea value={f.value} onChange={f.onChange} spellCheck={false} rows={3} style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF',minWidth:0,resize:'vertical'}} />
+                    ) : null}
                   </div>
                 ))}
                 {v.inspHint ? (
@@ -1288,6 +1382,38 @@ export default class Flowground extends React.Component {
               <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
                 <button onClick={v.onExportCopy} style={{background:'#FFFDF8',border:'1.5px solid #E4D5BF',borderRadius:11,padding:'8px 16px',font:"800 13px 'Nunito',sans-serif",color:'#5F5346',cursor:'pointer',minWidth:88}}>{v.copyLabel}</button>
                 <button onClick={v.onExportDownload} style={v.runBtnStyle}>Download .json</button>
+              </div>
+            </div>
+          </React.Fragment>
+        ) : null}
+
+        {v.llmOn ? (
+          <React.Fragment>
+            <div onClick={v.onCloseLLM} style={{position:'fixed',inset:0,background:'rgba(52,36,22,.42)',zIndex:55,animation:'fadein .2s'}}></div>
+            <div data-screen-label="AI settings" style={{position:'fixed',left:'50%',top:'50%',transform:'translate(-50%,-50%)',width:420,maxWidth:'90vw',background:'#FFFDF8',borderRadius:18,padding:18,zIndex:56,boxShadow:'0 24px 60px rgba(50,30,10,.4)',display:'flex',flexDirection:'column',gap:10,animation:'fadein .2s'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <div style={{font:"900 16px 'Nunito',sans-serif",color:'#43382E',flex:1}}>AI settings</div>
+                <button onClick={v.onCloseLLM} style={{background:'none',border:'none',font:"800 15px 'Nunito',sans-serif",color:'#A08F79',cursor:'pointer',padding:'4px 8px'}}>✕</button>
+              </div>
+              <div style={{font:"600 12px/1.55 'Nunito',sans-serif",color:'#A5947C'}}>Powers AI Generate / AI Judge blocks. Kept only in this browser (never in Export JSON) and sent straight to the endpoint below when you Run.</div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Compat mode</label>
+                <select value={v.llmMode} onChange={v.onLLMModeChange} style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}}>
+                  <option value="anthropic">Anthropic (/v1/messages)</option>
+                  <option value="openai">OpenAI-compatible (/chat/completions)</option>
+                </select>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Base URL</label>
+                <input value={v.llmBaseUrl} onChange={v.onLLMBaseUrlChange} spellCheck={false} placeholder="https://api.anthropic.com" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>API key</label>
+                <input value={v.llmApiKey} onChange={v.onLLMApiKeyChange} type="password" autoComplete="off" spellCheck={false} placeholder="sk-…" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{font:"800 10.5px 'Nunito',sans-serif",letterSpacing:'.08em',textTransform:'uppercase',color:'#A08F79'}}>Model</label>
+                <input value={v.llmModel} onChange={v.onLLMModelChange} spellCheck={false} placeholder="claude-3-5-haiku-20241022" style={{border:'1.5px solid #E7D9C4',borderRadius:10,padding:'7px 9px',font:'700 12.5px ui-monospace,Menlo,monospace',color:'#43382E',background:'#FFF'}} />
               </div>
             </div>
           </React.Fragment>

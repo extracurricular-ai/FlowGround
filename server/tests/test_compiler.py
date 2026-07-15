@@ -115,11 +115,12 @@ def test_fn_double_of_string_is_nan_not_error():
 class StubCtx:
     """Run context with an always-open credit gate."""
 
-    def __init__(self):
+    def __init__(self, llm=None):
         self.vars = {}
         self.loop_counts = {}
         self.steps = 0
         self.reports = []
+        self.llm = llm or {}
 
     async def acquire_credit(self):
         return None

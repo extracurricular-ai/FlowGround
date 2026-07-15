@@ -35,6 +35,8 @@ BLOCKS: Dict[str, BlockSpec] = {
     "split": BlockSpec("Split", "TASK", ("a", "b"), fan_out=True),
     "merge": BlockSpec("Merge", "AGGREGATE", ("out",)),
     "subgraph": BlockSpec("Subgraph", "SUBGRAPH", ("out",)),
+    "llm_generate": BlockSpec("AI Generate", "TASK", ("out",)),
+    "llm_judge": BlockSpec("AI Judge", "SWITCH", ("true", "false")),
 }
 
 #: blocks whose config carries a nested flowground.v1 flow (JSON-encoded
