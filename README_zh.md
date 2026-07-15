@@ -95,6 +95,16 @@ npm run dev
 
 打开 **http://localhost:5173**。Vite 会将 API 请求代理到 `8000` 端口的后端。
 
+### 或者：运行已发布的镜像
+
+打了标签的正式版本会发布到 GitHub Container Registry，前后端打包在同一个镜像里：
+
+```bash
+docker run -p 8000:8000 ghcr.io/extracurricular-ai/flowground:latest
+```
+
+打开 **http://localhost:8000**。
+
 ## 验证项目
 
 运行后端测试并生成生产环境前端构建：

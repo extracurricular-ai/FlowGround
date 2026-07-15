@@ -97,6 +97,17 @@ npm run dev
 
 Open **http://localhost:5173**. Vite proxies API requests to the backend on port `8000`.
 
+### Or: run the published image
+
+Tagged releases are published to GitHub Container Registry as a single image
+(frontend + backend):
+
+```bash
+docker run -p 8000:8000 ghcr.io/extracurricular-ai/flowground:latest
+```
+
+Open **http://localhost:8000**.
+
 ## Verify the project
 
 Run the backend tests and create a production frontend build:
