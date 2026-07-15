@@ -3,15 +3,21 @@
 - ``GET  /api/healthz``          liveness probe
 - ``POST /api/flows/validate``   friendly validation (incl. LoopGraph rejections)
 - ``WS   /api/runs``             run sessions (see PROTOCOL.md)
+
+If a built frontend is present at ``app/static`` (as in the Docker image), it's
+served at ``/`` — see the Dockerfile. In local dev, that directory doesn't
+exist and Vite serves the frontend instead.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from .compiler import compile_flow
 from .schema import FlowValidationError, parse_flow
@@ -67,3 +73,8 @@ async def runs(ws: WebSocket) -> None:
     finally:
         session.shutdown()
         sender.cancel()
+
+
+_static_dir = Path(__file__).resolve().parent / "static"
+if _static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
